@@ -54,13 +54,6 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
   const chunkContainsBell = createBellDetector()
   let suppressAttentionEvents = false
   let suppressAgentIdleTransitions = false
-  // Why: reattach can stream a catch-up burst that includes a BEL from a
-  // completion that fired while Orca was closed. We cannot distinguish a
-  // replayed completion BEL from a brand-new one, so we drop BEL during the
-  // same short grace window that covers idle-title transitions. Without this,
-  // the tab would be marked unread by the replayed bell on every restart and
-  // clicking through it would bring the mark back on the next relaunch.
-  let suppressCatchupBells = false
   let lastEmittedTitle: string | null = null
   let lastObservedTerminalTitle: string | null = null
   let openCodeStatus: OpenCodeStatusEvent['status'] | null = null
@@ -94,22 +87,22 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
     openCodeStatusHandlers.delete(id)
   }
 
-  // Why: arm a 2s grace window that drops catch-up attention events (replayed
-  // idle-title transitions and BEL) streamed by the daemon after a reattach.
-  // Shared by both reattach paths: in-session remount goes through attach(),
-  // while cold-app-relaunch goes through connect({sessionId}) — without
-  // covering both, a completion BEL from a prior session re-fires on every
-  // restart and permanently marks the tab unread.
+  // Why: arm a 2s grace window that drops catch-up working→idle title
+  // transitions streamed by the daemon after a reattach. Shared by both
+  // reattach paths: in-session remount goes through attach(), while
+  // cold-app-relaunch goes through connect({sessionId}).
+  // BEL is intentionally NOT suppressed here — pty-connection tracks
+  // paneIsInAgentMode per-pane and already drops BEL for agent panes
+  // (Claude Code emits BEL on every prompt redraw). A non-agent pane's BEL
+  // during the grace window is a legitimate shell bell and should fire.
   function armReattachGraceWindow(): void {
     suppressAgentIdleTransitions = true
-    suppressCatchupBells = true
     if (reattachGraceTimer) {
       clearTimeout(reattachGraceTimer)
     }
     reattachGraceTimer = setTimeout(() => {
       reattachGraceTimer = null
       suppressAgentIdleTransitions = false
-      suppressCatchupBells = false
       // Why: reset the tracker again here. Any working→idle transition during
       // the grace period was suppressed at the callback layer but still
       // mutated lastStatus. Reset so the first post-grace title starts clean.
@@ -187,7 +180,7 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
           }, STALE_TITLE_TIMEOUT)
         }
       }
-      if (onBell && chunkContainsBell(data) && !suppressAttentionEvents && !suppressCatchupBells) {
+      if (onBell && chunkContainsBell(data) && !suppressAttentionEvents) {
         onBell()
       }
     })
@@ -203,7 +196,6 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       reattachGraceTimer = null
     }
     suppressAgentIdleTransitions = false
-    suppressCatchupBells = false
     agentTracker?.reset()
     openCodeStatus = null
   }

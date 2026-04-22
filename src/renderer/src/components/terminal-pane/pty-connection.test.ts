@@ -54,7 +54,10 @@ vi.mock('@/store', () => ({
 
 vi.mock('@/lib/agent-status', () => ({
   isGeminiTerminalTitle: vi.fn(() => false),
-  isClaudeAgent: vi.fn(() => false)
+  isClaudeAgent: vi.fn(() => false),
+  detectAgentStatusFromTitle: vi.fn((title: string) =>
+    /Claude (working|done)/.test(title) ? (/working/.test(title) ? 'working' : 'idle') : null
+  )
 }))
 
 vi.mock('./cache-timer-seeding', () => ({
@@ -511,6 +514,76 @@ describe('connectPanePty', () => {
     expect(remountTransport.attach).not.toHaveBeenCalled()
     await Promise.resolve()
     expect(remountDeps.syncPanePtyLayoutBinding).toHaveBeenCalledWith(1, 'pty-restarted')
+  })
+
+  // Why: Claude Code (and likely other TUIs) emits BEL bytes as part of its
+  // normal UI rendering — every prompt redraw includes a BEL. If BEL drove
+  // the attention signal for agent panes, clicking away from an agent tab
+  // would re-flag it unread on the next render frame, producing a dot the
+  // user cannot dismiss. onBell must become a no-op once we know the pane is
+  // in agent mode (working OR idle); attention for agents comes from the
+  // working→idle transition instead.
+  it('drops onBell when the pane is in agent mode', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport()
+    transportFactoryQueue.push(transport)
+
+    const pane = createPane(1)
+    const manager = createManager(1)
+    manager.getActivePane = vi.fn(() => ({ id: 999 }))
+    const deps = createDeps()
+
+    connectPanePty(pane as never, manager as never, deps as never)
+
+    const titleHandler = createdTransportOptions[0]?.onTitleChange as
+      | ((title: string, rawTitle: string) => void)
+      | undefined
+    const bellHandler = createdTransportOptions[0]?.onBell as (() => void) | undefined
+    if (!titleHandler || !bellHandler) {
+      throw new Error('Expected onTitleChange and onBell to be registered')
+    }
+
+    // Claude idle title — flips the pane into agent mode. No working→idle
+    // transition is required (reattach case).
+    titleHandler('* Claude done', '* Claude done')
+
+    bellHandler()
+    bellHandler()
+
+    expect(deps.markWorktreeUnread).not.toHaveBeenCalled()
+    expect(deps.markTerminalTabUnread).not.toHaveBeenCalled()
+    expect(deps.dispatchNotification).not.toHaveBeenCalled()
+  })
+
+  // Why: the working→idle transition is the attention signal for agent
+  // panes. onAgentBecameIdle must mark the tab and worktree unread so
+  // background agent tabs get the indicator on completion.
+  it('marks tab and worktree unread on agent working→idle transition', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport()
+    transportFactoryQueue.push(transport)
+
+    const pane = createPane(1)
+    const manager = createManager(1)
+    const deps = createDeps()
+
+    connectPanePty(pane as never, manager as never, deps as never)
+
+    const idleHandler = createdTransportOptions[0]?.onAgentBecameIdle as
+      | ((title: string) => void)
+      | undefined
+    if (!idleHandler) {
+      throw new Error('Expected onAgentBecameIdle to be registered')
+    }
+
+    idleHandler('* Claude done')
+
+    expect(deps.markWorktreeUnread).toHaveBeenCalledTimes(1)
+    expect(deps.markTerminalTabUnread).toHaveBeenCalledTimes(1)
+    expect(deps.dispatchNotification).toHaveBeenCalledWith({
+      source: 'agent-task-complete',
+      terminalTitle: '* Claude done'
+    })
   })
 
   it('debounces rapid bell bursts to one unread mark and notification', async () => {

@@ -1,7 +1,11 @@
 /* oxlint-disable max-lines */
 import type { PaneManager, ManagedPane } from '@/lib/pane-manager/pane-manager'
 import type { IDisposable } from '@xterm/xterm'
-import { isGeminiTerminalTitle, isClaudeAgent } from '@/lib/agent-status'
+import {
+  isGeminiTerminalTitle,
+  isClaudeAgent,
+  detectAgentStatusFromTitle
+} from '@/lib/agent-status'
 import { scheduleRuntimeGraphSync } from '@/runtime/sync-runtime-graph'
 import { useAppStore } from '@/store'
 import type { PtyConnectResult } from './pty-transport'
@@ -88,6 +92,15 @@ export function connectPanePty(
   const onTitleChange = (title: string, rawTitle: string): void => {
     manager.setPaneGpuRendering(pane.id, !isGeminiTerminalTitle(rawTitle))
     deps.setRuntimePaneTitle(deps.tabId, pane.id, title)
+    // Why: flip the pane into "agent mode" the first time we see an agent
+    // title (working OR idle). This covers the reattach case where the pane
+    // starts already-idle and no working→idle transition ever fires — without
+    // it, Claude Code's idle-state redraws (which include BEL bytes) would
+    // be treated as shell bells and mark the tab unread. onAgentExited clears
+    // the flag when the title reverts to a plain shell.
+    if (detectAgentStatusFromTitle(rawTitle) !== null) {
+      paneIsInAgentMode = true
+    }
     // Why: only the focused pane should drive the tab title — otherwise two
     // agents in split panes cause rapid title flickering as each emits OSC
     // sequences. Mirrors Ghostty's approach: only the active split's title
@@ -125,30 +138,42 @@ export function connectPanePty(
   // otherwise flood the tab strip with "needs attention" toggles and OS
   // notifications. 100ms is short enough to preserve perceptible responsiveness
   // for an intentional second bell while collapsing machine-gun bursts.
+  // Why: Claude Code (and likely other TUIs) emits BEL bytes as part of its
+  // normal UI rendering — e.g., every prompt redraw includes a BEL. Treating
+  // BEL as an attention signal while an agent is running produces a
+  // never-ending stream of "needs attention" flips that the user cannot
+  // dismiss (clearing on focus re-fires on the next render frame). So we
+  // suppress BEL-driven attention whenever the pane's current title looks
+  // like an agent title (working OR idle — includes reattach, where no
+  // working→idle transition fires). When the pane is in "agent mode",
+  // attention comes from the working→idle transition (onAgentBecameIdle).
+  let paneIsInAgentMode = false
   let lastBellTime = 0
   const onBell = (): void => {
+    if (paneIsInAgentMode) {
+      return
+    }
     const now = Date.now()
     if (now - lastBellTime < 100) {
       return
     }
     lastBellTime = now
-    // Why: on BEL, mark the tab and worktree unread so a background tab gets
-    // a visual "needs attention" indicator, and fire the OS notification.
-    // markTerminalTabUnread self-guards against flagging the focused tab, so
-    // this is a no-op when the user is already looking at this tab. The
-    // indicator clears when the user selects/activates the tab. BEL is the
-    // single attention signal — agent title transitions no longer drive the
-    // sticky indicator (see onAgentBecameIdle).
+    // Why: on BEL (shell-level \a, not an agent redraw), mark the tab and
+    // worktree unread so a background tab gets a visual "needs attention"
+    // indicator, and fire the OS notification. markTerminalTabUnread
+    // self-guards against flagging the focused tab, so this is a no-op when
+    // the user is already looking at this tab.
     deps.markWorktreeUnread(deps.worktreeId)
     deps.markTerminalTabUnread(deps.tabId)
     deps.dispatchNotification({ source: 'terminal-bell' })
   }
   const onAgentBecameIdle = (title: string): void => {
-    // Why: agent title transitions no longer mark the tab unread — BEL (via
-    // onBell) is the single attention signal, so we don't double-mark when an
-    // agent both emits BEL on completion and flips its title to idle. We
-    // still fire the OS notification here so agents that don't emit BEL on
-    // completion still get the completion audio/notification.
+    // Why: agents emit BEL continuously as part of UI rendering (Claude Code
+    // redraws its prompt frequently), so onBell cannot be the attention
+    // signal for agent panes. Mark the tab and worktree unread on the
+    // working→idle transition — this is the actual "task finished" moment.
+    deps.markWorktreeUnread(deps.worktreeId)
+    deps.markTerminalTabUnread(deps.tabId)
     deps.dispatchNotification({ source: 'agent-task-complete', terminalTitle: title })
     // Why: only start the prompt-cache countdown for Claude agents — other agents
     // have different (or no) prompt-caching semantics and showing a timer for them
@@ -170,6 +195,7 @@ export function connectPanePty(
     deps.setCacheTimerStartedAt(cacheKey, null)
   }
   const onAgentExited = (): void => {
+    paneIsInAgentMode = false
     // Why: when the terminal title reverts to a plain shell (e.g., "bash", "zsh"),
     // the agent has exited. Clear any running cache timer so the sidebar doesn't
     // show a stale countdown for a tab that no longer has an active Claude session.

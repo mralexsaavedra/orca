@@ -258,114 +258,78 @@ test.describe('Terminal attention', () => {
     }
   })
 
-  // Why: the bug this guards against is Claude completion → BEL → Cmd+Q →
-  // relaunch producing a phantom unread dot on a tab the user never saw ring.
-  // The daemon keeps the BEL in its catch-up buffer and streams it after
-  // reattach; without the transport's grace window covering BEL, the tab gets
-  // re-marked on every launch and tab-clicks cannot clear it permanently.
-  test('restore does not manufacture unread attention from a pre-shutdown BEL', async (// oxlint-disable-next-line no-empty-pattern -- Playwright restart sessions do not use the shared fixtures.
-  {}, testInfo) => {
-    const repoPath = readFileSync(TEST_REPO_PATH_FILE, 'utf-8').trim()
-    if (!repoPath || !existsSync(repoPath)) {
-      test.skip(true, 'Global setup did not produce a seeded test repo')
-      return
+  // Why: the bug this guards against is Claude-style TUIs that emit BEL
+  // bytes as part of their normal render loop (every prompt redraw includes
+  // a BEL). Before the fix, onBell would mark the tab unread on every
+  // redraw after focus changed — clicking the tab cleared the dot, but the
+  // next render immediately re-fired it, so the user could never dismiss
+  // the bell while the agent was running. The fix: in pty-connection, once
+  // an agent title has been observed on the pane, onBell becomes a no-op
+  // and attention is driven by the working→idle transition instead.
+  test('agent-style BEL noise does not produce an undismissable tab bell', async ({ orcaPage }) => {
+    await waitForSessionReady(orcaPage)
+    const worktreeId = await waitForActiveWorktree(orcaPage)
+    await ensureTerminalVisible(orcaPage)
+    await waitForActiveTerminalManager(orcaPage, 30_000)
+
+    const firstTabId = await getActiveTabId(orcaPage)
+    if (!firstTabId) {
+      throw new Error('Expected an initial terminal tab')
     }
 
-    const session = createRestartSession(testInfo)
-    let firstApp: ElectronApplication | null = null
-    let secondApp: ElectronApplication | null = null
+    const agentTabId = await createTerminalTab(orcaPage, worktreeId)
+    await waitForActiveTerminalManager(orcaPage, 30_000)
+    const agentTabPtyId = await discoverActivePtyId(orcaPage)
 
-    try {
-      const firstLaunch = await session.launch()
-      firstApp = firstLaunch.app
-      const worktreeId = await attachRepoAndOpenTerminal(firstLaunch.page, repoPath)
-      await waitForSessionReady(firstLaunch.page)
-      await waitForActiveWorktree(firstLaunch.page)
-      await ensureTerminalVisible(firstLaunch.page)
-      await waitForActiveTerminalManager(firstLaunch.page, 30_000)
+    // Simulate a Claude-like agent: emit an idle agent title, then a burst
+    // of BELs that mimic its per-redraw BEL emission.
+    await execInTerminal(
+      orcaPage,
+      agentTabPtyId,
+      `node -e "process.stdout.write('\\u001b]0;* Claude done\\u0007');` +
+        `for (let i = 0; i < 5; i++) process.stdout.write('\\u0007');"`
+    )
 
-      // Daemon-backed terminals route through the reattach path on relaunch
-      // (connect({sessionId}) returning isReattach), which is the code path
-      // this test exercises. Non-daemon terminals cold-spawn fresh and don't
-      // replay any buffered BEL.
-      await enableTerminalDaemon(firstLaunch.page)
-      const daemonTabId = await createTerminalTab(firstLaunch.page, worktreeId)
-      await waitForActiveTerminalManager(firstLaunch.page, 30_000)
-      const daemonTabPtyId = await discoverActivePtyId(firstLaunch.page)
+    // Focus a different tab so activity on the agent tab *could* flip the
+    // dot. With the fix, it must not — the pane is in agent mode and BEL
+    // noise is ignored.
+    await activateTerminalTab(orcaPage, firstTabId)
 
-      // Focus a different tab so the BEL legitimately marks the daemon tab
-      // unread in the first session — markTerminalTabUnread no-ops on the
-      // focused tab. Without this, the BEL would be suppressed in-session and
-      // there'd be nothing for the daemon to replay.
-      const originalTabId = await firstLaunch.page.evaluate(() => {
-        const store = window.__store
-        if (!store) {
-          throw new Error('window.__store is unavailable')
-        }
-        const activeWorktreeId = store.getState().activeWorktreeId
-        if (!activeWorktreeId) {
-          return null
-        }
-        const tabs = store.getState().tabsByWorktree[activeWorktreeId] ?? []
-        return tabs[0]?.id ?? null
+    // Give the output time to stream through and any bogus unread-mark to
+    // land. If the bug regresses, the agent tab will be flagged well within
+    // this window.
+    await orcaPage.waitForTimeout(1500)
+
+    const agentTabBell = orcaPage
+      .locator(
+        `[data-testid="sortable-tab"][data-tab-id="${agentTabId}"] [data-testid="tab-activity-bell"]`
+      )
+      .first()
+    await expect(agentTabBell).toBeHidden()
+    await expect
+      .poll(async () => (await getUnreadTerminalTabIds(orcaPage)).includes(agentTabId), {
+        timeout: 2_000,
+        message: 'Agent-mode pane was marked unread by BEL noise'
       })
-      if (!originalTabId || originalTabId === daemonTabId) {
-        throw new Error(
-          'Expected a non-daemon tab to exist so we can focus away from the daemon tab'
-        )
-      }
-      await activateTerminalTab(firstLaunch.page, originalTabId)
+      .toBe(false)
 
-      await emitTerminalBell(firstLaunch.page, daemonTabPtyId)
-      await expect
-        .poll(async () => (await getUnreadTerminalTabIds(firstLaunch.page)).includes(daemonTabId), {
-          timeout: 10_000,
-          message: 'Daemon-backed tab did not record the pre-shutdown BEL as unread'
-        })
-        .toBe(true)
-
-      await session.close(firstApp)
-      firstApp = null
-
-      const secondLaunch = await session.launch()
-      secondApp = secondLaunch.app
-      await bootstrapRestoredLaunch(secondLaunch.page, worktreeId)
-
-      // After restart, no tab should be flagged. The pre-shutdown unread is
-      // transient UI state and is not persisted, and the replayed catch-up
-      // BEL must not re-raise it.
-      await expect
-        .poll(async () => await getUnreadTerminalTabIds(secondLaunch.page), {
-          timeout: 10_000,
-          message: 'Restore manufactured unread attention from the replayed catch-up BEL'
-        })
-        .toEqual([])
-      await expect
-        .poll(async () => await isWorktreeUnread(secondLaunch.page, worktreeId), {
-          timeout: 10_000,
-          message: 'Restore marked the worktree unread from the replayed catch-up BEL'
-        })
-        .toBe(false)
-      await expect(secondLaunch.page.locator('[data-testid="tab-activity-bell"]')).toHaveCount(0)
-
-      // Why: the bug's signature was "the dot comes back every time I
-      // relaunch". Once the grace window closes (2s), no further phantom
-      // unread should appear either.
-      await secondLaunch.page.waitForTimeout(3000)
-      await expect
-        .poll(async () => await getUnreadTerminalTabIds(secondLaunch.page), {
-          timeout: 5_000,
-          message: 'Phantom unread attention appeared after the reattach grace window expired'
-        })
-        .toEqual([])
-    } finally {
-      if (secondApp) {
-        await session.close(secondApp)
-      }
-      if (firstApp) {
-        await session.close(firstApp)
-      }
-      session.dispose()
-    }
+    // Sanity check: the fix does NOT break attention for non-agent panes.
+    // After the agent exits (title reverts to shell), a real BEL should
+    // still mark the tab.
+    await execInTerminal(
+      orcaPage,
+      agentTabPtyId,
+      `node -e "process.stdout.write('\\u001b]0;bash\\u0007')"`
+    )
+    // Why: brief pause so the title change propagates through the agent
+    // tracker and paneIsInAgentMode is cleared via onAgentExited.
+    await orcaPage.waitForTimeout(500)
+    await emitTerminalBell(orcaPage, agentTabPtyId)
+    await expect
+      .poll(async () => (await getUnreadTerminalTabIds(orcaPage)).includes(agentTabId), {
+        timeout: 5_000,
+        message: 'Shell BEL (post-agent-exit) did not mark the tab unread'
+      })
+      .toBe(true)
   })
 })

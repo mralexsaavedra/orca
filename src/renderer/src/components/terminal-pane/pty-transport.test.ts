@@ -118,7 +118,7 @@ describe('createIpcPtyTransport', () => {
     expect(onBell).not.toHaveBeenCalled()
   })
 
-  it('suppresses catch-up attention events (idle transition and BEL) during attach, then lets them through after the grace window', async () => {
+  it('suppresses catch-up idle transitions during attach without muting transport-level BEL', async () => {
     vi.useFakeTimers()
     try {
       const { createIpcPtyTransport } = await import('./pty-transport')
@@ -142,25 +142,21 @@ describe('createIpcPtyTransport', () => {
       onData?.({ id: 'pty-restored', data: '\u001b]0;. Claude working\u0007' })
       onData?.({ id: 'pty-restored', data: '\u001b]0;* Claude done\u0007\u0007' })
 
-      // Why: during the 2s grace window after reattach, both the catch-up
-      // idle-title transition and the catch-up BEL must be suppressed.
-      // Neither can be distinguished from a replayed event that fired while
-      // the app was closed, and letting them through would manufacture
-      // phantom unread marks the user cannot dismiss.
+      // Why: during the 2s grace window, catch-up idle transitions are
+      // suppressed because the daemon may replay a working→idle title from a
+      // prior session. BEL passes through at the transport layer — whether
+      // it is acted on is decided in pty-connection's onBell (which has a
+      // per-pane agent-mode guard so TUIs like Claude Code don't mark the
+      // tab unread on every prompt redraw).
       expect(onAgentBecameWorking).toHaveBeenCalledTimes(1)
       expect(onAgentBecameIdle).not.toHaveBeenCalled()
-      expect(onBell).not.toHaveBeenCalled()
+      expect(onBell).toHaveBeenCalledTimes(1)
 
       vi.advanceTimersByTime(2000)
       onData?.({ id: 'pty-restored', data: '\u001b]0;. Claude working\u0007' })
       onData?.({ id: 'pty-restored', data: '\u001b]0;* Claude done\u0007' })
-      // Why: a raw BEL (not an OSC terminator) fires onBell after the grace
-      // window expires. Without this, the only BEL in the stream is the OSC
-      // ST, which the bell detector correctly ignores.
-      onData?.({ id: 'pty-restored', data: '\u0007' })
 
       expect(onAgentBecameIdle).toHaveBeenCalledTimes(1)
-      expect(onBell).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
