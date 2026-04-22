@@ -123,6 +123,7 @@ export default function TerminalPane({
   const clearTabPtyId = useAppStore((store) => store.clearTabPtyId)
   const markWorktreeUnread = useAppStore((store) => store.markWorktreeUnread)
   const markTerminalTabUnread = useAppStore((store) => store.markTerminalTabUnread)
+  const clearTabAgentMode = useAppStore((store) => store.clearTabAgentMode)
   const settings = useAppStore((store) => store.settings)
   // Why: Windows is the only platform where bare right-click is repurposed as
   // a paste gesture; on macOS/Linux the terminal still owns right-click for the
@@ -366,6 +367,7 @@ export default function TerminalPane({
     updateTabPtyId,
     markWorktreeUnread,
     markTerminalTabUnread,
+    clearTabAgentMode,
     dispatchNotification,
     setCacheTimerStartedAt,
     syncPanePtyLayoutBinding,
@@ -429,6 +431,7 @@ export default function TerminalPane({
         updateTabPtyId,
         markWorktreeUnread,
         markTerminalTabUnread,
+        clearTabAgentMode,
         dispatchNotification,
         setCacheTimerStartedAt,
         syncPanePtyLayoutBinding
@@ -444,6 +447,7 @@ export default function TerminalPane({
       dispatchNotification,
       markWorktreeUnread,
       markTerminalTabUnread,
+      clearTabAgentMode,
       onPtyExitRef,
       setCacheTimerStartedAt,
       setRuntimePaneTitle,

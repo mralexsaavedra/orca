@@ -59,7 +59,8 @@ const terminalTabSchema = z.object({
   color: z.string().nullable(),
   sortOrder: z.number(),
   createdAt: z.number(),
-  generation: z.number().optional()
+  generation: z.number().optional(),
+  wasAgentPane: z.boolean().optional()
 })
 
 // ─── Unified tab model ──────────────────────────────────────────────

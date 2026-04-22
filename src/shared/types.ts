@@ -142,6 +142,14 @@ export type TerminalTab = {
   createdAt: number
   /** Bumped on shutdown so TerminalPane remounts with a fresh PTY. */
   generation?: number
+  /** Why: persists whether an agent was ever observed in this tab. Survives
+   *  both clearTransientTerminalState (shutdown) and session hydration so
+   *  pty-connection can seed paneIsInAgentMode on reattach before the first
+   *  BEL arrives. Cleared only when the agent explicitly exits (title reverts
+   *  to a bare shell). Without this, a restored Claude-like TUI's
+   *  post-reattach BEL repaint stream re-marks the tab unread on every
+   *  tab-switch — the "undismissable bell" bug. */
+  wasAgentPane?: boolean
 }
 
 export type BrowserHistoryEntry = {

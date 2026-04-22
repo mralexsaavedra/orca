@@ -115,6 +115,10 @@ export type TerminalSlice = {
   markTerminalTabUnread: (tabId: string) => void
   /** Clear the unread flag for a tab. Called when the user focuses the tab. */
   clearTerminalTabUnread: (tabId: string) => void
+  /** Clear the persisted agent-pane latch on this tab. Called when the agent
+   *  exits (title reverts to a bare shell), so future shell BELs are not
+   *  suppressed. */
+  clearTabAgentMode: (tabId: string) => void
   setTabCustomTitle: (tabId: string, title: string | null) => void
   setTabColor: (tabId: string, color: string | null) => void
   updateTabPtyId: (tabId: string, ptyId: string) => void
@@ -519,7 +523,13 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
             return t
           }
           const nextTitle = title.trim() || getFallbackTabTitle(t)
-          if (t.title === nextTitle) {
+          // Why: latch wasAgentPane the first time we see an agent title on
+          // this tab. Survives session hydration + clearTransientTerminalState
+          // so pty-connection can seed paneIsInAgentMode on reattach before
+          // the first BEL arrives. Cleared only when the agent explicitly
+          // exits (see clearTerminalTabAgentMode, fired from onAgentExited).
+          const wasAgentPane = t.wasAgentPane || detectAgentStatusFromTitle(nextTitle) !== null
+          if (t.title === nextTitle && t.wasAgentPane === wasAgentPane) {
             return t
           }
           changed = true
@@ -532,7 +542,8 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
             defaultTitle:
               t.defaultTitle ??
               (/^Terminal \d+$/.test(t.title) ? t.title : undefined) ??
-              (/^Terminal \d+$/.test(nextTitle) ? nextTitle : undefined)
+              (/^Terminal \d+$/.test(nextTitle) ? nextTitle : undefined),
+            wasAgentPane
           }
         })
       }
@@ -648,6 +659,26 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       const next = { ...s.unreadTerminalTabs }
       delete next[tabId]
       return { unreadTerminalTabs: next }
+    })
+  },
+
+  clearTabAgentMode: (tabId) => {
+    set((s) => {
+      let changed = false
+      const next = { ...s.tabsByWorktree }
+      for (const wId of Object.keys(next)) {
+        next[wId] = next[wId].map((t) => {
+          if (t.id !== tabId || !t.wasAgentPane) {
+            return t
+          }
+          changed = true
+          return { ...t, wasAgentPane: false }
+        })
+      }
+      if (!changed) {
+        return s
+      }
+      return { tabsByWorktree: next }
     })
   },
 

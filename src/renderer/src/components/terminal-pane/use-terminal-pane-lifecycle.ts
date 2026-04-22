@@ -78,6 +78,7 @@ type UseTerminalPaneLifecycleDeps = {
   updateTabPtyId: (tabId: string, ptyId: string) => void
   markWorktreeUnread: (worktreeId: string) => void
   markTerminalTabUnread: (tabId: string) => void
+  clearTabAgentMode: (tabId: string) => void
   dispatchNotification: (event: {
     source: 'agent-task-complete' | 'terminal-bell'
     terminalTitle?: string
@@ -160,6 +161,7 @@ export function useTerminalPaneLifecycle({
   updateTabPtyId,
   markWorktreeUnread,
   markTerminalTabUnread,
+  clearTabAgentMode,
   dispatchNotification,
   setCacheTimerStartedAt,
   syncPanePtyLayoutBinding,
@@ -280,6 +282,7 @@ export function useTerminalPaneLifecycle({
       updateTabPtyId,
       markWorktreeUnread,
       markTerminalTabUnread,
+      clearTabAgentMode,
       dispatchNotification,
       setCacheTimerStartedAt,
       syncPanePtyLayoutBinding,

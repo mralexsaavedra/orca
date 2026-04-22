@@ -175,10 +175,14 @@ export function connectPanePty(
     const storeState = useAppStore.getState()
     const tabs = Object.values(storeState.tabsByWorktree ?? {}).flat()
     const tab = tabs.find((entry) => entry.id === deps.tabId)
-    if (!tab?.title) {
-      return false
-    }
-    return detectAgentStatusFromTitle(tab.title) !== null
+    // Why: `wasAgentPane` is a persistent latch set the first time
+    // updateTabTitle saw an agent title, and it survives both
+    // clearTransientTerminalState (shutdown reset) and session hydration.
+    // Falling back to a live title check covers first-run in-session
+    // remounts before the latch has been written yet.
+    return (
+      tab?.wasAgentPane === true || (!!tab?.title && detectAgentStatusFromTitle(tab.title) !== null)
+    )
   })()
   let lastBellTime = 0
   const onBell = (): void => {
@@ -228,6 +232,10 @@ export function connectPanePty(
   }
   const onAgentExited = (): void => {
     paneIsInAgentMode = false
+    // Why: clear the persisted wasAgentPane latch so future shell BELs in
+    // this tab are not suppressed. Pair with the in-memory paneIsInAgentMode
+    // reset above so reattach after agent-exit starts clean.
+    deps.clearTabAgentMode(deps.tabId)
     // Why: when the terminal title reverts to a plain shell (e.g., "bash", "zsh"),
     // the agent has exited. Clear any running cache timer so the sidebar doesn't
     // show a stale countdown for a tab that no longer has an active Claude session.

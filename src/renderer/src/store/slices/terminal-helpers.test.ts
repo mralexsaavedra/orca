@@ -58,23 +58,31 @@ describe('clearTransientTerminalState', () => {
     expect(result.title).toBe('bash')
   })
 
-  // Why: preserving idle agent titles across restart feeds the
-  // paneIsInAgentMode seed in pty-connection.ts — without it, a restored
-  // Claude pane's post-reattach BEL repaint stream marks the tab unread on
-  // every tab switch (undismissable-bell bug).
-  it('preserves idle agent titles across hydration', () => {
+  // Why: idle agent titles (e.g. "* Claude done") are reset to the fallback
+  // on hydration — the prior-session agent is no longer running, so showing
+  // its last title would be misleading. The separate `wasAgentPane` latch
+  // carries the "this was an agent pane" fact across hydration so
+  // pty-connection can still seed BEL suppression without the live title
+  // needing to survive.
+  it('resets idle agent titles to fallback across hydration', () => {
     const tab = makeTab({ title: '* Claude done', customTitle: null })
     const result = clearTransientTerminalState(tab, 0)
-    expect(result.title).toBe('* Claude done')
+    expect(result.title).toBe('Terminal 1')
   })
 
-  it('still resets working agent titles to fallback across hydration', () => {
-    // Why: "working" titles encode ephemeral per-request state that is
-    // misleading after restart — the prior request is not actually in flight
-    // on the reconnected PTY, so we reset to the stable terminal label.
+  it('also resets working agent titles to fallback across hydration', () => {
     const tab = makeTab({ title: '⠋ Claude working', customTitle: null })
     const result = clearTransientTerminalState(tab, 0)
     expect(result.title).toBe('Terminal 1')
+  })
+
+  // Why: wasAgentPane is the persistent latch that replaces the live-title
+  // seeding path. clearTransientTerminalState must preserve it so reattach
+  // after shutdown can read it and enter agent mode immediately.
+  it('preserves wasAgentPane across hydration', () => {
+    const tab = makeTab({ title: '* Claude done', wasAgentPane: true })
+    const result = clearTransientTerminalState(tab, 0)
+    expect(result.wasAgentPane).toBe(true)
   })
 
   it('uses "Terminal {index+1}" when customTitle is whitespace only', () => {
