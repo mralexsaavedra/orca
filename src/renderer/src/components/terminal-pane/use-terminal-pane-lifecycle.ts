@@ -77,6 +77,7 @@ type UseTerminalPaneLifecycleDeps = {
   clearRuntimePaneTitle: (tabId: string, paneId: number) => void
   updateTabPtyId: (tabId: string, ptyId: string) => void
   markWorktreeUnread: (worktreeId: string) => void
+  markTerminalTabUnread: (tabId: string) => void
   dispatchNotification: (event: {
     source: 'agent-task-complete' | 'terminal-bell'
     terminalTitle?: string
@@ -91,6 +92,11 @@ type UseTerminalPaneLifecycleDeps = {
   setPaneTitles: React.Dispatch<React.SetStateAction<Record<number, string>>>
   paneTitlesRef: React.RefObject<Record<number, string>>
   setRenamingPaneId: React.Dispatch<React.SetStateAction<number | null>>
+  // Why: TerminalPane exposes a reactive pane count so effects (e.g. the
+  // data-has-title toggler) re-run when panes are split or closed. The
+  // imperative managerRef.getPanes().length is not reactive, so without this
+  // dispatcher structural changes wouldn't trigger dependent effects.
+  setPaneCount: React.Dispatch<React.SetStateAction<number>>
 }
 
 type SplitStartupPayload = { command: string; env?: Record<string, string> }
@@ -153,6 +159,7 @@ export function useTerminalPaneLifecycle({
   clearRuntimePaneTitle,
   updateTabPtyId,
   markWorktreeUnread,
+  markTerminalTabUnread,
   dispatchNotification,
   setCacheTimerStartedAt,
   syncPanePtyLayoutBinding,
@@ -163,7 +170,8 @@ export function useTerminalPaneLifecycle({
   persistLayoutSnapshot,
   setPaneTitles,
   paneTitlesRef,
-  setRenamingPaneId
+  setRenamingPaneId,
+  setPaneCount
 }: UseTerminalPaneLifecycleDeps): void {
   const systemPrefersDarkRef = useRef(systemPrefersDark)
   systemPrefersDarkRef.current = systemPrefersDark
@@ -240,6 +248,14 @@ export function useTerminalPaneLifecycle({
       setTabCanExpandPane(tabId, paneCount > 1)
     }
 
+    // Why: publish the current pane count to React state so effects depending
+    // on structural changes (e.g. the data-has-title toggler) re-run on
+    // split/close. The pane list lives in an imperative PaneManager ref, so
+    // without this sync those effects would miss structural-only changes.
+    const syncPaneCount = (): void => {
+      setPaneCount(managerRef.current?.getPanes().length ?? 0)
+    }
+
     let shouldPersistLayout = false
     const restoredLeafIdsInCreationOrder = collectLeafIdsInReplayCreationOrder(
       initialLayoutRef.current.root
@@ -263,6 +279,7 @@ export function useTerminalPaneLifecycle({
       clearRuntimePaneTitle,
       updateTabPtyId,
       markWorktreeUnread,
+      markTerminalTabUnread,
       dispatchNotification,
       setCacheTimerStartedAt,
       syncPanePtyLayoutBinding,
@@ -335,6 +352,7 @@ export function useTerminalPaneLifecycle({
         // unaffected by this clear.
         ptyDeps.startup = null
         panePtyBindings.set(pane.id, panePtyBinding)
+        syncPaneCount()
         scheduleRuntimeGraphSync()
         queueResizeAll(true)
       },
@@ -387,6 +405,7 @@ export function useTerminalPaneLifecycle({
         // Dismiss the rename dialog if it was open for the closed pane,
         // otherwise it would submit against a non-existent pane.
         setRenamingPaneId((prev) => (prev === paneId ? null : prev))
+        syncPaneCount()
         // Why: PaneManager.closePane() reassigns activePaneId directly without
         // calling setActivePane(), so onActivePaneChange does not fire. Sync the
         // tab title to the survivor's stored title here so the tab label doesn't
@@ -420,6 +439,7 @@ export function useTerminalPaneLifecycle({
         scheduleRuntimeGraphSync()
         syncExpandedLayout()
         syncCanExpandState()
+        syncPaneCount()
         queueResizeAll(false)
         if (shouldPersistLayout) {
           persistLayoutSnapshot()
@@ -569,6 +589,7 @@ export function useTerminalPaneLifecycle({
 
     shouldPersistLayout = true
     syncCanExpandState()
+    syncPaneCount()
     applyAppearance(manager)
     queueResizeAll(isActive)
     persistLayoutSnapshot()

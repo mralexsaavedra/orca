@@ -118,6 +118,44 @@ describe('createIpcPtyTransport', () => {
     expect(onBell).not.toHaveBeenCalled()
   })
 
+  it('suppresses catch-up idle transitions during attach without muting live bells', async () => {
+    vi.useFakeTimers()
+    try {
+      const { createIpcPtyTransport } = await import('./pty-transport')
+      const onTitleChange = vi.fn()
+      const onAgentBecameWorking = vi.fn()
+      const onAgentBecameIdle = vi.fn()
+      const onBell = vi.fn()
+
+      const transport = createIpcPtyTransport({
+        onTitleChange,
+        onAgentBecameWorking,
+        onAgentBecameIdle,
+        onBell
+      })
+
+      transport.attach({
+        existingPtyId: 'pty-restored',
+        callbacks: {}
+      })
+
+      onData?.({ id: 'pty-restored', data: '\u001b]0;. Claude working\u0007' })
+      onData?.({ id: 'pty-restored', data: '\u001b]0;* Claude done\u0007\u0007' })
+
+      expect(onAgentBecameWorking).toHaveBeenCalledTimes(1)
+      expect(onAgentBecameIdle).not.toHaveBeenCalled()
+      expect(onBell).toHaveBeenCalledTimes(1)
+
+      vi.advanceTimersByTime(2000)
+      onData?.({ id: 'pty-restored', data: '\u001b]0;. Claude working\u0007' })
+      onData?.({ id: 'pty-restored', data: '\u001b]0;* Claude done\u0007' })
+
+      expect(onAgentBecameIdle).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('passes startup commands through PTY spawn instead of writing them after connect', async () => {
     const { createIpcPtyTransport } = await import('./pty-transport')
     const spawnMock = vi.fn().mockResolvedValue({ id: 'pty-1' })
@@ -403,5 +441,32 @@ describe('createIpcPtyTransport', () => {
 
     expect(onPtyExit).toHaveBeenCalledWith('pty-detached')
     expect(transport.getPtyId()).toBeNull()
+  })
+
+  it('cancels the attach grace timer on detach so stale callbacks cannot outlive the transport', async () => {
+    vi.useFakeTimers()
+    try {
+      const { createIpcPtyTransport } = await import('./pty-transport')
+      const onAgentBecameIdle = vi.fn()
+
+      const transport = createIpcPtyTransport({
+        onAgentBecameIdle
+      })
+
+      transport.attach({
+        existingPtyId: 'pty-detached',
+        callbacks: {}
+      })
+
+      transport.detach?.()
+      vi.advanceTimersByTime(2000)
+
+      onData?.({ id: 'pty-detached', data: '\u001b]0;. Claude working\u0007' })
+      onData?.({ id: 'pty-detached', data: '\u001b]0;* Claude done\u0007' })
+
+      expect(onAgentBecameIdle).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

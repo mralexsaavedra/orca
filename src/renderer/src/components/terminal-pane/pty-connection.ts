@@ -120,12 +120,35 @@ export function connectPanePty(
     // frame-level sync often runs before that async result arrives.
     scheduleRuntimeGraphSync()
   }
+  // Why (100ms bell debounce): a burst of BEL bytes from a misbehaving TUI
+  // (e.g. a shell completion that fires multiple bells in a tight loop) would
+  // otherwise flood the tab strip with "needs attention" toggles and OS
+  // notifications. 100ms is short enough to preserve perceptible responsiveness
+  // for an intentional second bell while collapsing machine-gun bursts.
+  let lastBellTime = 0
   const onBell = (): void => {
+    const now = Date.now()
+    if (now - lastBellTime < 100) {
+      return
+    }
+    lastBellTime = now
+    // Why: on BEL, mark the tab and worktree unread so a background tab gets
+    // a visual "needs attention" indicator, and fire the OS notification.
+    // markTerminalTabUnread self-guards against flagging the focused tab, so
+    // this is a no-op when the user is already looking at this tab. The
+    // indicator clears when the user selects/activates the tab. BEL is the
+    // single attention signal — agent title transitions no longer drive the
+    // sticky indicator (see onAgentBecameIdle).
     deps.markWorktreeUnread(deps.worktreeId)
+    deps.markTerminalTabUnread(deps.tabId)
     deps.dispatchNotification({ source: 'terminal-bell' })
   }
   const onAgentBecameIdle = (title: string): void => {
-    deps.markWorktreeUnread(deps.worktreeId)
+    // Why: agent title transitions no longer mark the tab unread — BEL (via
+    // onBell) is the single attention signal, so we don't double-mark when an
+    // agent both emits BEL on completion and flips its title to idle. We
+    // still fire the OS notification here so agents that don't emit BEL on
+    // completion still get the completion audio/notification.
     deps.dispatchNotification({ source: 'agent-task-complete', terminalTitle: title })
     // Why: only start the prompt-cache countdown for Claude agents — other agents
     // have different (or no) prompt-caching semantics and showing a timer for them

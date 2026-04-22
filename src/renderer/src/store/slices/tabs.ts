@@ -493,6 +493,24 @@ export const createTabsSlice: StateCreator<AppState, [], [], TabsSlice> = (set, 
         return {}
       }
       const { tab, worktreeId } = found
+      // Why: activating a terminal tab dismisses the tab-level bell — the user
+      // has now moved their eyes to this tab.
+      //
+      // Why (activeWorktree guard below): only dismiss the tab-level bell when
+      // the tab is in the active worktree — otherwise the tab is not visible
+      // yet and the signal would be lost before the user saw it. Mirrors the
+      // guard in focusGroup.
+      const terminalEntityId = tab.contentType === 'terminal' ? tab.entityId : null
+      const nextUnreadTerminalTabs =
+        state.activeWorktreeId === worktreeId &&
+        terminalEntityId &&
+        state.unreadTerminalTabs[terminalEntityId]
+          ? (() => {
+              const copy = { ...state.unreadTerminalTabs }
+              delete copy[terminalEntityId]
+              return copy
+            })()
+          : state.unreadTerminalTabs
       return {
         unifiedTabsByWorktree: {
           ...state.unifiedTabsByWorktree,
@@ -522,7 +540,8 @@ export const createTabsSlice: StateCreator<AppState, [], [], TabsSlice> = (set, 
         activeGroupIdByWorktree: {
           ...state.activeGroupIdByWorktree,
           [worktreeId]: tab.groupId
-        }
+        },
+        unreadTerminalTabs: nextUnreadTerminalTabs
       }
     })
   },
@@ -556,11 +575,21 @@ export const createTabsSlice: StateCreator<AppState, [], [], TabsSlice> = (set, 
       (group.recentTabIds ?? []).filter((id) => id !== tabId),
       remainingOrder
     )
+    const terminalEntityId = tab.contentType === 'terminal' ? tab.entityId : null
 
     set((current) => {
       const nextTabs = (current.unifiedTabsByWorktree[worktreeId] ?? []).filter(
         (item) => item.id !== tabId
       )
+      // Why: closeUnifiedTab can be invoked without going through terminals.closeTab
+      // (e.g., mergeGroupIntoSibling). The unread-flag map is keyed by terminal
+      // entityId and would otherwise leak a stale dot for a tab that no longer
+      // renders.
+      let nextUnreadTerminalTabs = current.unreadTerminalTabs
+      if (terminalEntityId && current.unreadTerminalTabs[terminalEntityId]) {
+        nextUnreadTerminalTabs = { ...current.unreadTerminalTabs }
+        delete nextUnreadTerminalTabs[terminalEntityId]
+      }
       let nextGroups = (current.groupsByWorktree[worktreeId] ?? []).map((candidate) =>
         candidate.id === group.id
           ? {
@@ -599,6 +628,7 @@ export const createTabsSlice: StateCreator<AppState, [], [], TabsSlice> = (set, 
         },
         layoutByWorktree: nextLayoutByWorktree,
         activeGroupIdByWorktree: nextActiveGroupIdByWorktree,
+        unreadTerminalTabs: nextUnreadTerminalTabs,
         // Why: the split-group model can legally derive "terminal with no
         // active tab" after the final unified tab closes. That leaves the
         // worktree selected but render-empty, so the workspace shows a blank
@@ -784,13 +814,36 @@ export const createTabsSlice: StateCreator<AppState, [], [], TabsSlice> = (set, 
         ...state.activeGroupIdByWorktree,
         [worktreeId]: groupId
       }
+      // Why: focusing a split group surfaces whichever terminal tab is already
+      // active in that group, so the tab-level bell is no longer needed.
+      //
+      // Why (activeWorktree guard below): only clear unreadTerminalTabs when
+      // focusing a group within the *active* worktree. If the caller is
+      // focusing a group in a background worktree, that tab is not visible
+      // yet — dismissing its bell here would silently swallow the signal
+      // before the user ever sees the tab. All current callers only fire for
+      // the active worktree, but this guard prevents future misuse.
       if (state.activeWorktreeId !== worktreeId) {
         return {
           activeGroupIdByWorktree: nextActiveGroupIdByWorktree
         }
       }
+      const group = (state.groupsByWorktree[worktreeId] ?? []).find((g) => g.id === groupId)
+      const activeTab = group?.activeTabId
+        ? (state.unifiedTabsByWorktree[worktreeId] ?? []).find((t) => t.id === group.activeTabId)
+        : null
+      const terminalEntityId = activeTab?.contentType === 'terminal' ? activeTab.entityId : null
+      const nextUnreadTerminalTabs =
+        terminalEntityId && state.unreadTerminalTabs[terminalEntityId]
+          ? (() => {
+              const copy = { ...state.unreadTerminalTabs }
+              delete copy[terminalEntityId]
+              return copy
+            })()
+          : state.unreadTerminalTabs
       return {
         activeGroupIdByWorktree: nextActiveGroupIdByWorktree,
+        unreadTerminalTabs: nextUnreadTerminalTabs,
         ...buildActiveSurfacePatch(
           {
             ...state,

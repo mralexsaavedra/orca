@@ -53,15 +53,17 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
   let ptyId: string | null = null
   const chunkContainsBell = createBellDetector()
   let suppressAttentionEvents = false
+  let suppressAgentIdleTransitions = false
   let lastEmittedTitle: string | null = null
   let lastObservedTerminalTitle: string | null = null
   let openCodeStatus: OpenCodeStatusEvent['status'] | null = null
   let staleTitleTimer: ReturnType<typeof setTimeout> | null = null
+  let reattachGraceTimer: ReturnType<typeof setTimeout> | null = null
   const agentTracker =
     onAgentBecameIdle || onAgentBecameWorking || onAgentExited
       ? createAgentStatusTracker(
           (title) => {
-            if (!suppressAttentionEvents) {
+            if (!suppressAgentIdleTransitions) {
               onAgentBecameIdle?.(title)
             }
           },
@@ -166,6 +168,11 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       clearTimeout(staleTitleTimer)
       staleTitleTimer = null
     }
+    if (reattachGraceTimer) {
+      clearTimeout(reattachGraceTimer)
+      reattachGraceTimer = null
+    }
+    suppressAgentIdleTransitions = false
     agentTracker?.reset()
     openCodeStatus = null
   }
@@ -291,7 +298,41 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
           }
         }
         bufferHandle.dispose()
+        // Why: replaying the eager buffer silently feeds historical OSC
+        // titles through the agent-status tracker. Its `lastStatus` field
+        // is mutated by every replayed title — if the prior session ended
+        // mid-"working", lastStatus would persist as 'working' into the
+        // live session. A later real title detected as 'idle' (common when
+        // the cwd path contains an agent name after the agent has exited)
+        // would then look like a fresh working→idle transition and fire
+        // a phantom unread notification. Reset after replay so only
+        // post-attach titles drive transitions.
+        agentTracker?.reset()
       }
+
+      // Why: on reattach, the daemon keeps streaming a short tail of catch-up
+      // bytes (titles, prompt redraws, spinner frames) that arrive AFTER the
+      // eager-buffer flush window closes. These can include working→idle
+      // OSC title transitions carried over from the prior session, producing
+      // phantom unread marks on app startup that the user cannot dismiss.
+      // Keep only title-driven idle transitions suppressed for a short grace
+      // period so any catch-up stream settles before we start believing those
+      // transitions represent fresh user-relevant activity. BEL stays live:
+      // a real bell right after reattach is still an intentional attention
+      // signal and should mark the tab/notify immediately.
+      suppressAgentIdleTransitions = true
+      if (reattachGraceTimer) {
+        clearTimeout(reattachGraceTimer)
+      }
+      reattachGraceTimer = setTimeout(() => {
+        reattachGraceTimer = null
+        suppressAgentIdleTransitions = false
+        // Why: also reset the tracker again here. Any working→idle
+        // transition that happened during the grace period was suppressed at
+        // the callback layer but still mutated lastStatus. Reset so the first
+        // post-grace title starts from a clean slate.
+        agentTracker?.reset()
+      }, 2000)
 
       // Why: clear the display before writing the snapshot so restored
       // content doesn't layer on top of stale output. Skip the clear for

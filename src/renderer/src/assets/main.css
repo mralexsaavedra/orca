@@ -264,6 +264,25 @@
   height: 0;
 }
 
+/* Tab activity indicator. A soft amber wash + bottom accent strip make
+   unread tabs visible at a glance across a crowded tab bar. The bell icon
+   in the tab content remains the primary symbol; this treatment amplifies
+   it without drowning the rest of the tab chrome. */
+.tab-has-activity {
+  background-color: rgba(245, 158, 11, 0.12) !important;
+}
+
+.tab-has-activity::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background-color: rgba(245, 158, 11, 0.9);
+  pointer-events: none;
+}
+
 /* ── Layout ──────────────────────────────────────────── */
 
 #root {

@@ -136,6 +136,7 @@ function createDeps(overrides: Record<string, unknown> = {}) {
     clearRuntimePaneTitle: vi.fn(),
     updateTabPtyId: vi.fn(),
     markWorktreeUnread: vi.fn(),
+    markTerminalTabUnread: vi.fn(),
     dispatchNotification: vi.fn(),
     setCacheTimerStartedAt: vi.fn(),
     syncPanePtyLayoutBinding: vi.fn(),
@@ -509,5 +510,41 @@ describe('connectPanePty', () => {
     expect(remountTransport.attach).not.toHaveBeenCalled()
     await Promise.resolve()
     expect(remountDeps.syncPanePtyLayoutBinding).toHaveBeenCalledWith(1, 'pty-restarted')
+  })
+
+  it('debounces rapid bell bursts to one unread mark and notification', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-04-22T12:00:00Z'))
+      const { connectPanePty } = await import('./pty-connection')
+      const transport = createMockTransport()
+      transportFactoryQueue.push(transport)
+
+      const pane = createPane(1)
+      const manager = createManager(1)
+      manager.getActivePane = vi.fn(() => ({ id: 999 }))
+      const deps = createDeps()
+
+      connectPanePty(pane as never, manager as never, deps as never)
+
+      const bellHandler = createdTransportOptions[0]?.onBell as (() => void) | undefined
+      if (!bellHandler) {
+        throw new Error('Expected onBell handler to be registered')
+      }
+
+      bellHandler()
+      vi.setSystemTime(new Date('2026-04-22T12:00:00.050Z'))
+      bellHandler()
+      vi.setSystemTime(new Date('2026-04-22T12:00:00.150Z'))
+      bellHandler()
+
+      expect(deps.markWorktreeUnread).toHaveBeenCalledTimes(2)
+      expect(deps.markTerminalTabUnread).toHaveBeenCalledTimes(2)
+      expect(deps.dispatchNotification).toHaveBeenCalledTimes(2)
+      expect(deps.dispatchNotification).toHaveBeenNthCalledWith(1, { source: 'terminal-bell' })
+      expect(deps.dispatchNotification).toHaveBeenNthCalledWith(2, { source: 'terminal-bell' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

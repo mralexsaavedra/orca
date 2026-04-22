@@ -1,0 +1,261 @@
+import { readFileSync, existsSync } from 'fs'
+import type { ElectronApplication, Page } from '@stablyai/playwright-test'
+import { test, expect } from './helpers/orca-app'
+import { TEST_REPO_PATH_FILE } from './global-setup'
+import { createRestartSession, attachRepoAndOpenTerminal } from './helpers/orca-restart'
+import {
+  discoverActivePtyId,
+  execInTerminal,
+  waitForActiveTerminalManager
+} from './helpers/terminal'
+import {
+  ensureTerminalVisible,
+  getActiveTabId,
+  getActiveWorktreeId,
+  getWorktreeTabs,
+  waitForActiveWorktree,
+  waitForSessionReady
+} from './helpers/store'
+
+test.describe.configure({ mode: 'serial' })
+
+async function createTerminalTab(page: Page, worktreeId: string): Promise<string> {
+  const tabId = await page.evaluate((targetWorktreeId) => {
+    const store = window.__store
+    if (!store) {
+      throw new Error('createTerminalTab: window.__store is unavailable')
+    }
+
+    const state = store.getState()
+    const newTab = state.createTab(targetWorktreeId)
+    state.setActiveTabType('terminal')
+    return newTab.id
+  }, worktreeId)
+
+  await expect
+    .poll(async () => (await getWorktreeTabs(page, worktreeId)).some((tab) => tab.id === tabId), {
+      timeout: 5_000,
+      message: `Terminal tab ${tabId} was not created`
+    })
+    .toBe(true)
+
+  return tabId
+}
+
+async function activateTerminalTab(page: Page, tabId: string): Promise<void> {
+  await page.evaluate((targetTabId) => {
+    const store = window.__store
+    if (!store) {
+      throw new Error('activateTerminalTab: window.__store is unavailable')
+    }
+    const state = store.getState()
+    state.setActiveTabType('terminal')
+    state.setActiveTab(targetTabId)
+  }, tabId)
+
+  await expect
+    .poll(async () => getActiveTabId(page), {
+      timeout: 5_000,
+      message: `Terminal tab ${tabId} did not become active`
+    })
+    .toBe(tabId)
+}
+
+async function emitTerminalBell(page: Page, ptyId: string): Promise<void> {
+  // Why: `node -e process.stdout.write('\u0007')` emits BEL as PTY output on
+  // every platform Orca supports. Writing a raw Ctrl+G input character would
+  // depend on shell readline behavior, which differs across bash/zsh/PowerShell.
+  await execInTerminal(page, ptyId, `node -e "process.stdout.write('\\u0007')"`)
+}
+
+async function emitAgentLikeTitleChurn(page: Page, ptyId: string): Promise<void> {
+  // Why: the restore regression came from replayed OSC title history mutating
+  // the agent tracker during attach. Emit one working and one idle title using
+  // Node so the sequence is shell-agnostic across macOS/Linux/Windows.
+  await execInTerminal(
+    page,
+    ptyId,
+    `node -e "process.stdout.write('\\u001b]0;. Claude working\\u0007');process.stdout.write('\\u001b]0;* Claude done\\u0007')"`
+  )
+}
+
+async function getUnreadTerminalTabIds(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const store = window.__store
+    if (!store) {
+      return []
+    }
+    return Object.keys(store.getState().unreadTerminalTabs)
+  })
+}
+
+async function isWorktreeUnread(page: Page, worktreeId: string): Promise<boolean> {
+  return page.evaluate((targetWorktreeId) => {
+    const store = window.__store
+    if (!store) {
+      return false
+    }
+    const worktrees = Object.values(store.getState().worktreesByRepo).flat()
+    return worktrees.find((worktree) => worktree.id === targetWorktreeId)?.isUnread === true
+  }, worktreeId)
+}
+
+async function enableTerminalDaemon(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const store = window.__store
+    if (!store) {
+      throw new Error('enableTerminalDaemon: window.__store is unavailable')
+    }
+    await store.getState().updateSettings({ experimentalTerminalDaemon: true })
+  })
+
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(
+          () => window.__store?.getState().settings?.experimentalTerminalDaemon === true
+        ),
+      {
+        timeout: 10_000,
+        message: 'experimentalTerminalDaemon was not enabled'
+      }
+    )
+    .toBe(true)
+}
+
+async function bootstrapRestoredLaunch(page: Page, expectedWorktreeId: string): Promise<void> {
+  await waitForSessionReady(page)
+  await expect
+    .poll(async () => getActiveWorktreeId(page), {
+      timeout: 10_000,
+      message: 'Restored launch did not reactivate the expected worktree'
+    })
+    .toBe(expectedWorktreeId)
+  await ensureTerminalVisible(page)
+  await waitForActiveTerminalManager(page, 30_000)
+}
+
+test.describe('Terminal attention', () => {
+  test('a bell still marks a background tab unread immediately after a real remount', async ({
+    orcaPage
+  }) => {
+    await waitForSessionReady(orcaPage)
+    const worktreeId = await waitForActiveWorktree(orcaPage)
+    await ensureTerminalVisible(orcaPage)
+    await waitForActiveTerminalManager(orcaPage, 30_000)
+
+    const firstTabId = await getActiveTabId(orcaPage)
+    if (!firstTabId) {
+      throw new Error('Expected an initial terminal tab')
+    }
+
+    const secondTabId = await createTerminalTab(orcaPage, worktreeId)
+    await waitForActiveTerminalManager(orcaPage, 30_000)
+    const secondTabPtyId = await discoverActivePtyId(orcaPage)
+
+    await activateTerminalTab(orcaPage, firstTabId)
+    await activateTerminalTab(orcaPage, secondTabId)
+    await waitForActiveTerminalManager(orcaPage, 30_000)
+    // Why: switching straight back makes `secondTabId` a background tab while
+    // its transport is still inside the attach grace window. That is the exact
+    // integration point the transport unit test cannot prove through the real UI.
+    await activateTerminalTab(orcaPage, firstTabId)
+
+    await emitTerminalBell(orcaPage, secondTabPtyId)
+
+    await expect
+      .poll(async () => (await getUnreadTerminalTabIds(orcaPage)).includes(secondTabId), {
+        timeout: 10_000,
+        message: 'Background tab did not become unread after BEL during remount grace'
+      })
+      .toBe(true)
+
+    const secondTabBell = orcaPage
+      .locator(
+        `[data-testid="sortable-tab"][data-tab-id="${secondTabId}"] [data-testid="tab-activity-bell"]`
+      )
+      .first()
+    await expect(secondTabBell).toBeVisible()
+
+    await activateTerminalTab(orcaPage, secondTabId)
+
+    await expect
+      .poll(async () => (await getUnreadTerminalTabIds(orcaPage)).includes(secondTabId), {
+        timeout: 5_000,
+        message: 'Unread tab state did not clear when the user focused the tab'
+      })
+      .toBe(false)
+    await expect(secondTabBell).toBeHidden()
+  })
+
+  test('restore does not manufacture unread attention from replayed terminal titles', async (// oxlint-disable-next-line no-empty-pattern -- Playwright restart sessions do not use the shared fixtures.
+  {}, testInfo) => {
+    const repoPath = readFileSync(TEST_REPO_PATH_FILE, 'utf-8').trim()
+    if (!repoPath || !existsSync(repoPath)) {
+      test.skip(true, 'Global setup did not produce a seeded test repo')
+      return
+    }
+
+    const session = createRestartSession(testInfo)
+    let firstApp: ElectronApplication | null = null
+    let secondApp: ElectronApplication | null = null
+
+    try {
+      const firstLaunch = await session.launch()
+      firstApp = firstLaunch.app
+      const worktreeId = await attachRepoAndOpenTerminal(firstLaunch.page, repoPath)
+      await waitForSessionReady(firstLaunch.page)
+      await waitForActiveWorktree(firstLaunch.page)
+      await ensureTerminalVisible(firstLaunch.page)
+      await waitForActiveTerminalManager(firstLaunch.page, 30_000)
+
+      await enableTerminalDaemon(firstLaunch.page)
+      const daemonTabId = await createTerminalTab(firstLaunch.page, worktreeId)
+      await waitForActiveTerminalManager(firstLaunch.page, 30_000)
+      const daemonTabPtyId = await discoverActivePtyId(firstLaunch.page)
+
+      await emitAgentLikeTitleChurn(firstLaunch.page, daemonTabPtyId)
+      await expect
+        .poll(
+          async () =>
+            (await getWorktreeTabs(firstLaunch.page, worktreeId)).some(
+              (tab) => tab.id === daemonTabId && /Claude done/.test(tab.title ?? '')
+            ),
+          {
+            timeout: 10_000,
+            message: 'Daemon-backed tab did not observe the synthetic agent title churn'
+          }
+        )
+        .toBe(true)
+
+      await session.close(firstApp)
+      firstApp = null
+
+      const secondLaunch = await session.launch()
+      secondApp = secondLaunch.app
+      await bootstrapRestoredLaunch(secondLaunch.page, worktreeId)
+
+      await expect
+        .poll(async () => await getUnreadTerminalTabIds(secondLaunch.page), {
+          timeout: 10_000,
+          message: 'Restore created unread terminal attention with no new BEL'
+        })
+        .toEqual([])
+      await expect
+        .poll(async () => await isWorktreeUnread(secondLaunch.page, worktreeId), {
+          timeout: 10_000,
+          message: 'Restore marked the worktree unread with no new BEL'
+        })
+        .toBe(false)
+      await expect(secondLaunch.page.locator('[data-testid="tab-activity-bell"]')).toHaveCount(0)
+    } finally {
+      if (secondApp) {
+        await session.close(secondApp)
+      }
+      if (firstApp) {
+        await session.close(firstApp)
+      }
+      session.dispose()
+    }
+  })
+})

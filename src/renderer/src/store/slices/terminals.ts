@@ -52,6 +52,11 @@ export type TerminalSlice = {
   /** Live pane titles keyed by tabId then paneId. Unlike the legacy tab title,
    *  this preserves split-pane agent status per pane while TerminalPane is mounted. */
   runtimePaneTitlesByTabId: Record<string, Record<number, string>>
+  /** Why: per-tab activity indicators. A tab gets flagged unread whenever a
+   *  bell rings in any of its panes while the tab is not currently focused.
+   *  The flag clears when the user activates the tab. This is ephemeral UI
+   *  state only — not persisted across restarts. */
+  unreadTerminalTabs: Record<string, true>
   suppressedPtyExitIds: Record<string, true>
   pendingCodexPaneRestartIds: Record<string, true>
   codexRestartNoticeByPtyId: Record<
@@ -104,6 +109,12 @@ export type TerminalSlice = {
   updateTabTitle: (tabId: string, title: string) => void
   setRuntimePaneTitle: (tabId: string, paneId: number, title: string) => void
   clearRuntimePaneTitle: (tabId: string, paneId: number) => void
+  /** Mark a tab as having unread activity (bell or agent-idle). Skipped when
+   *  the tab is the active tab of the active worktree — the user is already
+   *  looking at it, so flagging would never clear. */
+  markTerminalTabUnread: (tabId: string) => void
+  /** Clear the unread flag for a tab. Called when the user focuses the tab. */
+  clearTerminalTabUnread: (tabId: string) => void
   setTabCustomTitle: (tabId: string, title: string | null) => void
   setTabColor: (tabId: string, color: string | null) => void
   updateTabPtyId: (tabId: string, ptyId: string) => void
@@ -159,6 +170,7 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   activeTabIdByWorktree: {},
   ptyIdsByTabId: {},
   runtimePaneTitlesByTabId: {},
+  unreadTerminalTabs: {},
   suppressedPtyExitIds: {},
   pendingCodexPaneRestartIds: {},
   codexRestartNoticeByPtyId: {},
@@ -324,6 +336,8 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       delete nextPtyIdsByTabId[tabId]
       const nextRuntimePaneTitlesByTabId = { ...s.runtimePaneTitlesByTabId }
       delete nextRuntimePaneTitlesByTabId[tabId]
+      const nextUnreadTerminalTabs = { ...s.unreadTerminalTabs }
+      delete nextUnreadTerminalTabs[tabId]
       const nextPendingStartupByTabId = { ...s.pendingStartupByTabId }
       delete nextPendingStartupByTabId[tabId]
       const nextPendingSetupSplitByTabId = { ...s.pendingSetupSplitByTabId }
@@ -382,6 +396,7 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         activeTabIdByWorktree: nextActiveTabIdByWorktree,
         ptyIdsByTabId: nextPtyIdsByTabId,
         runtimePaneTitlesByTabId: nextRuntimePaneTitlesByTabId,
+        unreadTerminalTabs: nextUnreadTerminalTabs,
         expandedPaneByTabId: nextExpanded,
         canExpandPaneByTabId: nextCanExpand,
         terminalLayoutsByTabId: nextLayouts,
@@ -453,11 +468,36 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   setActiveTab: (tabId) => {
     set((s) => {
       const worktreeId = s.activeWorktreeId
+      // Why: focusing a terminal tab clears the tab-level bell — the user has
+      // moved to this tab.
+      //
+      // Why (activeWorktree guard below): only clear when the tab belongs to
+      // the active worktree. If setActiveTab is invoked with a tab from a
+      // background worktree (e.g., during worktree activation, or the
+      // "jump to agent" path), the tab is not yet visible and clearing would
+      // silently swallow the signal. Mirrors the guard in activateTab and
+      // focusGroup.
+      let tabOwnerWorktreeId: string | null = null
+      for (const [wId, tabs] of Object.entries(s.tabsByWorktree)) {
+        if (tabs.some((t) => t.id === tabId)) {
+          tabOwnerWorktreeId = wId
+          break
+        }
+      }
+      const nextUnreadTerminalTabs =
+        tabOwnerWorktreeId === s.activeWorktreeId && s.unreadTerminalTabs[tabId]
+          ? (() => {
+              const copy = { ...s.unreadTerminalTabs }
+              delete copy[tabId]
+              return copy
+            })()
+          : s.unreadTerminalTabs
       return {
         activeTabId: tabId,
         activeTabIdByWorktree: worktreeId
           ? { ...s.activeTabIdByWorktree, [worktreeId]: tabId }
-          : s.activeTabIdByWorktree
+          : s.activeTabIdByWorktree,
+        unreadTerminalTabs: nextUnreadTerminalTabs
       }
     })
     const item = Object.values(get().unifiedTabsByWorktree)
@@ -556,6 +596,58 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       }
 
       return { runtimePaneTitlesByTabId: next }
+    })
+  },
+
+  markTerminalTabUnread: (tabId) => {
+    const state = get()
+    // Why: skip tabs the user is already looking at. We must check both
+    // activeTabType AND activeTabId because activeTabId remains pinned to the
+    // last terminal tab even when the user has switched surfaces to the editor
+    // or browser (activeTabType !== 'terminal'). In that case a bell in this
+    // terminal is a legitimate unread signal — the user is NOT looking at it.
+    // Only suppress when the terminal surface is visible and this is the tab
+    // in view; otherwise the dot would never appear and the user would miss
+    // activity in an offscreen terminal. Mirrors the active-surface check in
+    // markWorktreeUnread.
+    if (state.activeTabType === 'terminal' && state.activeTabId === tabId) {
+      return
+    }
+    // Why: in split-group layouts multiple groups are visible simultaneously,
+    // each with its own active terminal tab. The global activeTabId only
+    // reflects the focused group's tab. If a bell fires in a tab that is the
+    // active tab of a non-focused but still-visible group, marking it unread
+    // would show a spurious bell on a pane the user can already see. We must
+    // also suppress marking when the tab is the active tab in any group of the
+    // currently active worktree.
+    if (state.activeWorktreeId) {
+      const groups = state.groupsByWorktree[state.activeWorktreeId] ?? []
+      const unifiedTabs = state.unifiedTabsByWorktree[state.activeWorktreeId] ?? []
+      for (const group of groups) {
+        if (group.activeTabId) {
+          const groupActiveTab = unifiedTabs.find((t) => t.id === group.activeTabId)
+          if (groupActiveTab?.contentType === 'terminal' && groupActiveTab.entityId === tabId) {
+            return
+          }
+        }
+      }
+    }
+    set((s) => {
+      if (s.unreadTerminalTabs[tabId]) {
+        return s
+      }
+      return { unreadTerminalTabs: { ...s.unreadTerminalTabs, [tabId]: true as const } }
+    })
+  },
+
+  clearTerminalTabUnread: (tabId) => {
+    set((s) => {
+      if (!s.unreadTerminalTabs[tabId]) {
+        return s
+      }
+      const next = { ...s.unreadTerminalTabs }
+      delete next[tabId]
+      return { unreadTerminalTabs: next }
     })
   },
 
@@ -740,10 +832,17 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
       // but non-interactive "zombie" pane. Clearing the per-leaf binding
       // forces a fresh spawn when the user returns to the worktree.
       const nextTerminalLayoutsByTabId = { ...s.terminalLayoutsByTabId }
+      // Why: unread dots survive across worktree switches by design, but a full
+      // shutdown tears down the PTYs behind them — the dot would point at a
+      // tab that is no longer running and cannot be cleared by focus because
+      // focus events for a killed pane never arrive. Drop them here so a later
+      // remount starts clean.
+      const nextUnreadTerminalTabs = { ...s.unreadTerminalTabs }
       for (const tab of tabs) {
         delete nextRuntimePaneTitlesByTabId[tab.id]
         delete nextPendingSetupSplitByTabId[tab.id]
         delete nextPendingIssueCommandSplitByTabId[tab.id]
+        delete nextUnreadTerminalTabs[tab.id]
         const existingLayout = nextTerminalLayoutsByTabId[tab.id]
         if (existingLayout?.ptyIdsByLeafId) {
           nextTerminalLayoutsByTabId[tab.id] = {
@@ -781,6 +880,7 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
         pendingSetupSplitByTabId: nextPendingSetupSplitByTabId,
         pendingIssueCommandSplitByTabId: nextPendingIssueCommandSplitByTabId,
         terminalLayoutsByTabId: nextTerminalLayoutsByTabId,
+        unreadTerminalTabs: nextUnreadTerminalTabs,
         browserTabsByWorktree: nextBrowserTabsByWorktree,
         activeBrowserTabIdByWorktree: nextActiveBrowserTabIdByWorktree,
         ...(shouldResetGlobalBrowser

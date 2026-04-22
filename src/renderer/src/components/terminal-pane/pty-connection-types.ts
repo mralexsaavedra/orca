@@ -20,6 +20,7 @@ export type PtyConnectionDeps = {
   clearRuntimePaneTitle: (tabId: string, paneId: number) => void
   updateTabPtyId: (tabId: string, ptyId: string) => void
   markWorktreeUnread: (worktreeId: string) => void
+  markTerminalTabUnread: (tabId: string) => void
   dispatchNotification: (event: {
     source: 'agent-task-complete' | 'terminal-bell'
     terminalTitle?: string
