@@ -187,4 +187,45 @@ describe('parseAgentStatusPayload', () => {
     expect(result!.prompt).toHaveLength(AGENT_STATUS_MAX_FIELD_LENGTH)
     expect(result!.toolInput).toBe('xxxxx')
   })
+
+  describe('interrupted field', () => {
+    it('preserves interrupted: true when state is "done"', () => {
+      const result = parseAgentStatusPayload(JSON.stringify({ state: 'done', interrupted: true }))
+      expect(result!.interrupted).toBe(true)
+    })
+
+    it('drops interrupted: true when state is "working" (invariant: only valid on done)', () => {
+      const result = parseAgentStatusPayload(
+        JSON.stringify({ state: 'working', interrupted: true })
+      )
+      expect(result!.interrupted).toBeUndefined()
+    })
+
+    it('drops interrupted: true when state is "blocked" (invariant: only valid on done)', () => {
+      const result = parseAgentStatusPayload(
+        JSON.stringify({ state: 'blocked', interrupted: true })
+      )
+      expect(result!.interrupted).toBeUndefined()
+    })
+
+    it('drops interrupted: false on "done" (only literal true is accepted)', () => {
+      const result = parseAgentStatusPayload(JSON.stringify({ state: 'done', interrupted: false }))
+      expect(result!.interrupted).toBeUndefined()
+    })
+
+    it('drops truthy-but-non-boolean interrupted: 1 on "done" (strict === true)', () => {
+      const result = parseAgentStatusPayload(JSON.stringify({ state: 'done', interrupted: 1 }))
+      expect(result!.interrupted).toBeUndefined()
+    })
+
+    it('drops string "true" for interrupted on "done" (strict === true)', () => {
+      const result = parseAgentStatusPayload(JSON.stringify({ state: 'done', interrupted: 'true' }))
+      expect(result!.interrupted).toBeUndefined()
+    })
+
+    it('leaves interrupted undefined when the field is omitted entirely on "done"', () => {
+      const result = parseAgentStatusPayload(JSON.stringify({ state: 'done' }))
+      expect(result!.interrupted).toBeUndefined()
+    })
+  })
 })

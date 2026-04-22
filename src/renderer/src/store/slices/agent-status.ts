@@ -89,8 +89,16 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
 
     const now = Date.now()
     let nextExpiryAt = Number.POSITIVE_INFINITY
+    // Why: only consider entries whose stale deadline is still in the future.
+    // If every entry is already past its threshold (e.g. an agent exited without
+    // cleanup), the freshness epoch has nothing left to advance through —
+    // scheduling a 0-ms timer here would fire immediately, bump the epoch, and
+    // recursively re-enter this function in a hot loop.
     for (const entry of entries) {
-      nextExpiryAt = Math.min(nextExpiryAt, entry.updatedAt + AGENT_STATUS_STALE_AFTER_MS)
+      const expiresAt = entry.updatedAt + AGENT_STATUS_STALE_AFTER_MS
+      if (expiresAt > now) {
+        nextExpiryAt = Math.min(nextExpiryAt, expiresAt)
+      }
     }
     if (!Number.isFinite(nextExpiryAt)) {
       return
@@ -101,8 +109,13 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
       staleExpiryTimer = null
       // Why: freshness is time-based, not event-based. Advancing this epoch at
       // the exact stale boundary forces all freshness-aware selectors to
-      // recompute even when no new PTY output arrives.
-      set((s) => ({ agentStatusEpoch: s.agentStatusEpoch + 1 }))
+      // recompute even when no new PTY output arrives. `sortEpoch` bumps too
+      // so the sidebar re-sorts — smart-score drops "running +60" when an
+      // entry goes stale and the heuristic fallback takes over.
+      set((s) => ({
+        agentStatusEpoch: s.agentStatusEpoch + 1,
+        sortEpoch: s.sortEpoch + 1
+      }))
       scheduleNextFreshnessExpiry()
     }, delayMs)
   }
@@ -161,12 +174,17 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
           // it when a new turn starts (working → Stop reprices it).
           interrupted: payload.interrupted
         }
+        // Why: `agentStatusEpoch` bumps on every update because visual +
+        // freshness selectors (WorktreeCard status, hover content) care about
+        // tool-name/prompt/assistant-message churn within a turn. `sortEpoch`,
+        // on the other hand, only bumps on actual `state` transitions — sort
+        // order is a function of state, so churning it on every tool/prompt
+        // event would stress the sidebar's smart-sort debounce for no reason.
+        const stateChanged = !existing || existing.state !== payload.state
         return {
           agentStatusByPaneKey: { ...s.agentStatusByPaneKey, [paneKey]: entry },
-          // Why: bump both epochs so WorktreeCard re-derives its visual status
-          // and WorktreeList re-sorts immediately when an agent reports status.
           agentStatusEpoch: s.agentStatusEpoch + 1,
-          sortEpoch: s.sortEpoch + 1
+          sortEpoch: stateChanged ? s.sortEpoch + 1 : s.sortEpoch
         }
       })
       // Why: schedule after set completes so the timer reads the updated map.
@@ -181,9 +199,15 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
         }
         const next = { ...s.agentStatusByPaneKey }
         delete next[paneKey]
+        // Why: deletion is a structural change that can flip smart-score
+        // (running/needs-attention weights) so sortEpoch must bump alongside
+        // agentStatusEpoch. WorktreeList's sortedIds no longer subscribes to
+        // agentStatusEpoch directly, so sortEpoch is the only signal that
+        // reaches the sort.
         return {
           agentStatusByPaneKey: next,
-          agentStatusEpoch: s.agentStatusEpoch + 1
+          agentStatusEpoch: s.agentStatusEpoch + 1,
+          sortEpoch: s.sortEpoch + 1
         }
       })
       queueMicrotask(() => scheduleNextFreshnessExpiry())
@@ -201,9 +225,11 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
         for (const key of toRemove) {
           delete next[key]
         }
+        // Why: same as removeAgentStatus — deletions can change smart-score.
         return {
           agentStatusByPaneKey: next,
-          agentStatusEpoch: s.agentStatusEpoch + 1
+          agentStatusEpoch: s.agentStatusEpoch + 1,
+          sortEpoch: s.sortEpoch + 1
         }
       })
       queueMicrotask(() => scheduleNextFreshnessExpiry())
