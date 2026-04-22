@@ -54,6 +54,13 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
   const chunkContainsBell = createBellDetector()
   let suppressAttentionEvents = false
   let suppressAgentIdleTransitions = false
+  // Why: reattach can stream a catch-up burst that includes a BEL from a
+  // completion that fired while Orca was closed. We cannot distinguish a
+  // replayed completion BEL from a brand-new one, so we drop BEL during the
+  // same short grace window that covers idle-title transitions. Without this,
+  // the tab would be marked unread by the replayed bell on every restart and
+  // clicking through it would bring the mark back on the next relaunch.
+  let suppressCatchupBells = false
   let lastEmittedTitle: string | null = null
   let lastObservedTerminalTitle: string | null = null
   let openCodeStatus: OpenCodeStatusEvent['status'] | null = null
@@ -85,6 +92,29 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
   function unregisterPtyDataAndStatusHandlers(id: string): void {
     ptyDataHandlers.delete(id)
     openCodeStatusHandlers.delete(id)
+  }
+
+  // Why: arm a 2s grace window that drops catch-up attention events (replayed
+  // idle-title transitions and BEL) streamed by the daemon after a reattach.
+  // Shared by both reattach paths: in-session remount goes through attach(),
+  // while cold-app-relaunch goes through connect({sessionId}) — without
+  // covering both, a completion BEL from a prior session re-fires on every
+  // restart and permanently marks the tab unread.
+  function armReattachGraceWindow(): void {
+    suppressAgentIdleTransitions = true
+    suppressCatchupBells = true
+    if (reattachGraceTimer) {
+      clearTimeout(reattachGraceTimer)
+    }
+    reattachGraceTimer = setTimeout(() => {
+      reattachGraceTimer = null
+      suppressAgentIdleTransitions = false
+      suppressCatchupBells = false
+      // Why: reset the tracker again here. Any working→idle transition during
+      // the grace period was suppressed at the callback layer but still
+      // mutated lastStatus. Reset so the first post-grace title starts clean.
+      agentTracker?.reset()
+    }, 2000)
   }
 
   function getSyntheticOpenCodeTitle(status: OpenCodeStatusEvent['status']): string {
@@ -157,7 +187,7 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
           }, STALE_TITLE_TIMEOUT)
         }
       }
-      if (onBell && chunkContainsBell(data) && !suppressAttentionEvents) {
+      if (onBell && chunkContainsBell(data) && !suppressAttentionEvents && !suppressCatchupBells) {
         onBell()
       }
     })
@@ -173,6 +203,7 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       reattachGraceTimer = null
     }
     suppressAgentIdleTransitions = false
+    suppressCatchupBells = false
     agentTracker?.reset()
     openCodeStatus = null
   }
@@ -241,6 +272,14 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
         storedCallbacks.onStatus?.('shell')
 
         if (result.isReattach || result.coldRestore) {
+          // Why: cold-app relaunch of a daemon-backed tab comes through this
+          // path (deferred reattach in pty-connection.ts), not attach(). The
+          // daemon streams catch-up bytes — including any BEL from a
+          // completion that fired while Orca was closed — after the first
+          // onData frame. Without arming the grace window here, every
+          // restart of a tab whose agent had completed would re-raise a
+          // phantom "needs attention" mark that tab-clicks couldn't clear.
+          armReattachGraceWindow()
           return {
             id: result.id,
             snapshot: result.snapshot,
@@ -310,29 +349,12 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
         agentTracker?.reset()
       }
 
-      // Why: on reattach, the daemon keeps streaming a short tail of catch-up
-      // bytes (titles, prompt redraws, spinner frames) that arrive AFTER the
-      // eager-buffer flush window closes. These can include working→idle
-      // OSC title transitions carried over from the prior session, producing
-      // phantom unread marks on app startup that the user cannot dismiss.
-      // Keep only title-driven idle transitions suppressed for a short grace
-      // period so any catch-up stream settles before we start believing those
-      // transitions represent fresh user-relevant activity. BEL stays live:
-      // a real bell right after reattach is still an intentional attention
-      // signal and should mark the tab/notify immediately.
-      suppressAgentIdleTransitions = true
-      if (reattachGraceTimer) {
-        clearTimeout(reattachGraceTimer)
-      }
-      reattachGraceTimer = setTimeout(() => {
-        reattachGraceTimer = null
-        suppressAgentIdleTransitions = false
-        // Why: also reset the tracker again here. Any working→idle
-        // transition that happened during the grace period was suppressed at
-        // the callback layer but still mutated lastStatus. Reset so the first
-        // post-grace title starts from a clean slate.
-        agentTracker?.reset()
-      }, 2000)
+      // Why: on reattach, the daemon keeps streaming a short tail of
+      // catch-up bytes (titles, prompt redraws, spinner frames, BEL from
+      // completions that fired while the app was closed) after the
+      // eager-buffer flush window closes. Those events are indistinguishable
+      // from fresh activity. Drop attention signals for a short grace window.
+      armReattachGraceWindow()
 
       // Why: clear the display before writing the snapshot so restored
       // content doesn't layer on top of stale output. Skip the clear for

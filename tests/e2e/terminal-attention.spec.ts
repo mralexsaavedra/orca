@@ -136,9 +136,7 @@ async function bootstrapRestoredLaunch(page: Page, expectedWorktreeId: string): 
 }
 
 test.describe('Terminal attention', () => {
-  test('a bell still marks a background tab unread immediately after a real remount', async ({
-    orcaPage
-  }) => {
+  test('a bell marks a background tab unread and clears on focus', async ({ orcaPage }) => {
     await waitForSessionReady(orcaPage)
     const worktreeId = await waitForActiveWorktree(orcaPage)
     await ensureTerminalVisible(orcaPage)
@@ -154,19 +152,20 @@ test.describe('Terminal attention', () => {
     const secondTabPtyId = await discoverActivePtyId(orcaPage)
 
     await activateTerminalTab(orcaPage, firstTabId)
-    await activateTerminalTab(orcaPage, secondTabId)
-    await waitForActiveTerminalManager(orcaPage, 30_000)
-    // Why: switching straight back makes `secondTabId` a background tab while
-    // its transport is still inside the attach grace window. That is the exact
-    // integration point the transport unit test cannot prove through the real UI.
-    await activateTerminalTab(orcaPage, firstTabId)
+    // Why: the transport arms a 2s grace window on reattach that suppresses
+    // BEL so a replayed completion bell from a prior session can't manufacture
+    // phantom unread marks. Wait past that window before emitting a fresh
+    // bell so the test exercises the normal live-bell path, not the
+    // grace-window suppression path. The grace-window behavior itself is
+    // verified by the transport unit tests.
+    await orcaPage.waitForTimeout(2500)
 
     await emitTerminalBell(orcaPage, secondTabPtyId)
 
     await expect
       .poll(async () => (await getUnreadTerminalTabIds(orcaPage)).includes(secondTabId), {
         timeout: 10_000,
-        message: 'Background tab did not become unread after BEL during remount grace'
+        message: 'Background tab did not become unread after BEL'
       })
       .toBe(true)
 
