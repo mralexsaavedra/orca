@@ -111,7 +111,8 @@ function createManager(paneCount = 1) {
   return {
     setPaneGpuRendering: vi.fn(),
     getPanes: vi.fn(() => Array.from({ length: paneCount }, (_, index) => ({ id: index + 1 }))),
-    closePane: vi.fn()
+    closePane: vi.fn(),
+    getActivePane: vi.fn<() => { id: number } | null>(() => null)
   }
 }
 
