@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type StoreState = {
-  tabsByWorktree: Record<string, { id: string; ptyId: string | null }[]>
+  tabsByWorktree: Record<string, { id: string; ptyId: string | null; title?: string }[]>
   ptyIdsByTabId?: Record<string, string[]>
   worktreesByRepo: Record<string, { id: string; repoId: string; path: string }[]>
   repos: { id: string; connectionId?: string | null }[]
@@ -514,6 +514,138 @@ describe('connectPanePty', () => {
     expect(remountTransport.attach).not.toHaveBeenCalled()
     await Promise.resolve()
     expect(remountDeps.syncPanePtyLayoutBinding).toHaveBeenCalledWith(1, 'pty-restarted')
+  })
+
+  // Why: this pins down the reattach scenario directly. After Cmd+Q and
+  // relaunch, a restored Claude pane emits its idle title first (no
+  // working→idle transition fires), followed by a stream of BEL bytes from
+  // its repaint loop. Before the fix, the BELs marked the tab unread on
+  // every tab-switch — an undismissable indicator. The pane must observe the
+  // idle title and immediately start dropping BEL at the pty-connection layer.
+  it('drops BEL bytes that arrive after a restored Claude idle title (reattach path)', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport()
+    transportFactoryQueue.push(transport)
+
+    const pane = createPane(1)
+    const manager = createManager(1)
+    manager.getActivePane = vi.fn(() => ({ id: 999 }))
+    const deps = createDeps({
+      restoredLeafId: 'pane:1',
+      restoredPtyIdByLeafId: { 'pane:1': 'pty-restored' }
+    })
+
+    connectPanePty(pane as never, manager as never, deps as never)
+
+    const titleHandler = createdTransportOptions[0]?.onTitleChange as
+      | ((title: string, rawTitle: string) => void)
+      | undefined
+    const bellHandler = createdTransportOptions[0]?.onBell as (() => void) | undefined
+    if (!titleHandler || !bellHandler) {
+      throw new Error('Expected onTitleChange and onBell to be registered')
+    }
+
+    // Step 1: the daemon replays the final pre-restart title. No working→idle
+    // transition fires; the pane sees 'idle' on first sight.
+    titleHandler('* Claude done', '* Claude done')
+
+    // Step 2: Claude's post-reattach repaint stream — three separate BEL
+    // chunks, mimicking the user's actual bug logs.
+    bellHandler()
+    bellHandler()
+    bellHandler()
+
+    // None of these should produce an unread mark or notification. Attention
+    // for this pane now comes from a future working→idle transition.
+    expect(deps.markWorktreeUnread).not.toHaveBeenCalled()
+    expect(deps.markTerminalTabUnread).not.toHaveBeenCalled()
+    expect(deps.dispatchNotification).not.toHaveBeenCalled()
+  })
+
+  // Why: the regression signature is "the dot comes back every time I click
+  // away, even after the agent has exited". If onAgentExited does not clear
+  // paneIsInAgentMode, then after Claude quits, a legitimate shell BEL (from
+  // tooling running in the bare shell) would still be dropped.
+  it('allows onBell again after onAgentExited fires', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport()
+    transportFactoryQueue.push(transport)
+
+    const pane = createPane(1)
+    const manager = createManager(1)
+    manager.getActivePane = vi.fn(() => ({ id: 999 }))
+    const deps = createDeps()
+
+    connectPanePty(pane as never, manager as never, deps as never)
+
+    const titleHandler = createdTransportOptions[0]?.onTitleChange as
+      | ((title: string, rawTitle: string) => void)
+      | undefined
+    const bellHandler = createdTransportOptions[0]?.onBell as (() => void) | undefined
+    const agentExitedHandler = createdTransportOptions[0]?.onAgentExited as (() => void) | undefined
+    if (!titleHandler || !bellHandler || !agentExitedHandler) {
+      throw new Error('Expected onTitleChange, onBell, and onAgentExited to be registered')
+    }
+
+    // Enter agent mode.
+    titleHandler('* Claude done', '* Claude done')
+    bellHandler()
+    expect(deps.markTerminalTabUnread).not.toHaveBeenCalled()
+
+    // Claude exits — shell prompt returns.
+    agentExitedHandler()
+
+    // A real shell BEL should now mark the tab again.
+    bellHandler()
+    expect(deps.markWorktreeUnread).toHaveBeenCalledTimes(1)
+    expect(deps.markTerminalTabUnread).toHaveBeenCalledTimes(1)
+    expect(deps.dispatchNotification).toHaveBeenCalledWith({ source: 'terminal-bell' })
+  })
+
+  // Why: this covers the reattach sequence. After Cmd+Q → relaunch, the
+  // daemon returns a snapshot but xterm's @xterm/addon-serialize does NOT
+  // include the OSC window title in its output, so replaying the snapshot
+  // doesn't teach the pane it was in agent mode. The persisted tab title
+  // (in the Orca store) does carry over the "* Claude done" string, so we
+  // seed paneIsInAgentMode from it at connect time. Without this seed, the
+  // post-reattach BEL repaint stream marks the tab unread on every tab
+  // switch — the undismissable-bell bug after restart.
+  it('seeds agent mode from the persisted tab title on reattach', async () => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport()
+    transportFactoryQueue.push(transport)
+
+    // The persisted tab title is what survives across restart. Place it in
+    // store state the way a restored session would.
+    mockStoreState = {
+      ...mockStoreState,
+      tabsByWorktree: {
+        'wt-1': [{ id: 'tab-1', ptyId: 'tab-pty', title: '* Claude done' }]
+      }
+    }
+
+    const pane = createPane(1)
+    const manager = createManager(1)
+    manager.getActivePane = vi.fn(() => ({ id: 999 }))
+    const deps = createDeps()
+
+    connectPanePty(pane as never, manager as never, deps as never)
+
+    const bellHandler = createdTransportOptions[0]?.onBell as (() => void) | undefined
+    if (!bellHandler) {
+      throw new Error('Expected onBell to be registered')
+    }
+
+    // BEL noise arrives immediately after reattach — before any PTY title
+    // event has had a chance to flip the pane into agent mode. Seeding from
+    // the persisted title is what catches this timing window.
+    bellHandler()
+    bellHandler()
+    bellHandler()
+
+    expect(deps.markWorktreeUnread).not.toHaveBeenCalled()
+    expect(deps.markTerminalTabUnread).not.toHaveBeenCalled()
+    expect(deps.dispatchNotification).not.toHaveBeenCalled()
   })
 
   // Why: Claude Code (and likely other TUIs) emits BEL bytes as part of its

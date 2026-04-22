@@ -58,6 +58,25 @@ describe('clearTransientTerminalState', () => {
     expect(result.title).toBe('bash')
   })
 
+  // Why: preserving idle agent titles across restart feeds the
+  // paneIsInAgentMode seed in pty-connection.ts — without it, a restored
+  // Claude pane's post-reattach BEL repaint stream marks the tab unread on
+  // every tab switch (undismissable-bell bug).
+  it('preserves idle agent titles across hydration', () => {
+    const tab = makeTab({ title: '* Claude done', customTitle: null })
+    const result = clearTransientTerminalState(tab, 0)
+    expect(result.title).toBe('* Claude done')
+  })
+
+  it('still resets working agent titles to fallback across hydration', () => {
+    // Why: "working" titles encode ephemeral per-request state that is
+    // misleading after restart — the prior request is not actually in flight
+    // on the reconnected PTY, so we reset to the stable terminal label.
+    const tab = makeTab({ title: '⠋ Claude working', customTitle: null })
+    const result = clearTransientTerminalState(tab, 0)
+    expect(result.title).toBe('Terminal 1')
+  })
+
   it('uses "Terminal {index+1}" when customTitle is whitespace only', () => {
     const tab = makeTab({ title: '⠋ codex running', customTitle: '   ' })
     const result = clearTransientTerminalState(tab, 0)

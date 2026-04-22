@@ -163,7 +163,23 @@ export function connectPanePty(
   // (working OR idle — the idle case covers reattach, where no working→idle
   // transition ever fires). onAgentExited clears the flag so a real shell
   // BEL after the agent quits still surfaces.
-  let paneIsInAgentMode = false
+  //
+  // Why seed from the persisted tab title: xterm's serialize addon (used by
+  // the daemon to snapshot terminal state) does NOT include the OSC window
+  // title, so snapshot replay cannot teach us the pane was in agent mode.
+  // The renderer's own persisted tab title is the reliable carry-over —
+  // if it looks like an agent title, start in agent mode. Without this,
+  // Claude's post-reattach BEL repaint stream marks the tab unread on every
+  // tab-switch after restart (the undismissable-bell bug).
+  let paneIsInAgentMode = (() => {
+    const storeState = useAppStore.getState()
+    const tabs = Object.values(storeState.tabsByWorktree ?? {}).flat()
+    const tab = tabs.find((entry) => entry.id === deps.tabId)
+    if (!tab?.title) {
+      return false
+    }
+    return detectAgentStatusFromTitle(tab.title) !== null
+  })()
   let lastBellTime = 0
   const onBell = (): void => {
     if (paneIsInAgentMode) {
