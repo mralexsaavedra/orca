@@ -138,15 +138,31 @@ export function connectPanePty(
   // otherwise flood the tab strip with "needs attention" toggles and OS
   // notifications. 100ms is short enough to preserve perceptible responsiveness
   // for an intentional second bell while collapsing machine-gun bursts.
-  // Why: Claude Code (and likely other TUIs) emits BEL bytes as part of its
-  // normal UI rendering — e.g., every prompt redraw includes a BEL. Treating
-  // BEL as an attention signal while an agent is running produces a
-  // never-ending stream of "needs attention" flips that the user cannot
-  // dismiss (clearing on focus re-fires on the next render frame). So we
-  // suppress BEL-driven attention whenever the pane's current title looks
-  // like an agent title (working OR idle — includes reattach, where no
-  // working→idle transition fires). When the pane is in "agent mode",
-  // attention comes from the working→idle transition (onAgentBecameIdle).
+  //
+  // Why (agent-mode BEL suppression): full-screen agent TUIs — Claude Code is
+  // the current motivating example, but the pattern generalizes — emit BEL
+  // bytes as part of their render loop (every prompt repaint typically
+  // contains a BEL). If we treated BEL as an attention signal while an agent
+  // was active, any interaction that caused the TUI to repaint (tab switch,
+  // pane resize, focus event) would re-flag the tab unread. The user would
+  // click the tab to dismiss it, click away, and the very next repaint would
+  // fire another BEL and re-mark it — an undismissable indicator.
+  //
+  // Note: a stricter debounce (e.g. once per minute) could plausibly tame the
+  // noise without special-casing agent mode, but would also swallow a
+  // legitimate user-driven bell that happened to land within the window,
+  // and the noise floor under an active agent is much higher than 1/min.
+  // Outright ignoring BEL while the pane is in agent mode is the only option
+  // that reliably prevents the undismissable-dot failure mode. The trade-off
+  // is that if an agent ever used BEL as a genuine attention signal mid-run
+  // (Claude Code does not — its attention cue is the working→idle title
+  // transition, handled in onAgentBecameIdle), we would miss it. That is
+  // acceptable given the alternative is a broken per-tab indicator.
+  //
+  // A pane is considered "in agent mode" after we see any agent title on it
+  // (working OR idle — the idle case covers reattach, where no working→idle
+  // transition ever fires). onAgentExited clears the flag so a real shell
+  // BEL after the agent quits still surfaces.
   let paneIsInAgentMode = false
   let lastBellTime = 0
   const onBell = (): void => {
