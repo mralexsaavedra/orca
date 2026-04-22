@@ -406,6 +406,12 @@ describe('TabsSlice', () => {
       // t2 is active after creation; move focus to t1 so we can mark t2 unread.
       store.getState().activateTab(t1.id)
 
+      // Mark WT as the active worktree. activateTab's unread-clear is guarded
+      // on activeWorktreeId so the signal isn't swallowed when activating a
+      // tab in a hidden worktree. Real-world callers only hit activateTab
+      // for visible tabs, so this mirrors production conditions.
+      store.setState({ activeWorktreeId: WT })
+
       // t1.entityId and t2.entityId are the terminal tabIds that
       // markTerminalTabUnread / TabBar read from.
       const t2TerminalId = t2.entityId
@@ -553,9 +559,12 @@ describe('TabsSlice', () => {
       // Focus Group B first so the active group is not A.
       store.getState().focusGroup(WT, groupBId)
 
-      // Seed tab-level unread on Group A's terminal tab.
+      // Seed tab-level unread on Group A's terminal tab. Also mark WT as the
+      // active worktree — focusGroup's unread-clear is guarded on
+      // activeWorktreeId to avoid swallowing bells in hidden worktrees.
       store.setState({
-        unreadTerminalTabs: { [tabA.entityId]: true as const }
+        unreadTerminalTabs: { [tabA.entityId]: true as const },
+        activeWorktreeId: WT
       })
 
       // Clicking Group A's chrome re-focuses the group without necessarily
@@ -579,7 +588,8 @@ describe('TabsSlice', () => {
         unreadTerminalTabs: {
           [tabA.entityId]: true as const,
           [tabB.entityId]: true as const
-        }
+        },
+        activeWorktreeId: WT
       })
 
       // Focusing Group A must only clear Group A's active tab.
