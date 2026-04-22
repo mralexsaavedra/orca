@@ -175,11 +175,6 @@ export function connectPanePty(
     const storeState = useAppStore.getState()
     const tabs = Object.values(storeState.tabsByWorktree ?? {}).flat()
     const tab = tabs.find((entry) => entry.id === deps.tabId)
-    // Why: `wasAgentPane` is a persistent latch set the first time
-    // updateTabTitle saw an agent title, and it survives both
-    // clearTransientTerminalState (shutdown reset) and session hydration.
-    // Falling back to a live title check covers first-run in-session
-    // remounts before the latch has been written yet.
     return (
       tab?.wasAgentPane === true || (!!tab?.title && detectAgentStatusFromTitle(tab.title) !== null)
     )
@@ -204,12 +199,23 @@ export function connectPanePty(
     deps.dispatchNotification({ source: 'terminal-bell' })
   }
   const onAgentBecameIdle = (title: string): void => {
-    // Why: agents emit BEL continuously as part of UI rendering (Claude Code
-    // redraws its prompt frequently), so onBell cannot be the attention
-    // signal for agent panes. Mark the tab and worktree unread on the
-    // working→idle transition — this is the actual "task finished" moment.
+    // Why (worktree unread, OS notification): these are the cross-surface
+    // completion signals — they matter when the user is looking at a
+    // different worktree or another app entirely. markWorktreeUnread
+    // self-guards against flagging the active worktree.
     deps.markWorktreeUnread(deps.worktreeId)
-    deps.markTerminalTabUnread(deps.tabId)
+    // Why NO tab-level mark here: agent titles churn unpredictably (Claude
+    // Code flashes working→idle on repaints triggered by tab switches, pane
+    // resizes, etc.). Using that transition to flag the tab unread produces
+    // an undismissable indicator in exactly the scenario this PR is fixing.
+    // The user reported: "click on the other tab in the same split, the
+    // bell shows up again." That was this path firing on a phantom idle
+    // transition. Tab-level attention for agents comes only from an
+    // explicit user-facing completion signal (BEL) when the pane is NOT
+    // already in agent mode — which never fires for Claude because it's
+    // always in agent mode while running. Net effect: no spurious tab bell
+    // for agent panes. Trade-off: no tab-level indicator on agent
+    // completion either; we rely on the worktree bell + OS notification.
     deps.dispatchNotification({ source: 'agent-task-complete', terminalTitle: title })
     // Why: only start the prompt-cache countdown for Claude agents — other agents
     // have different (or no) prompt-caching semantics and showing a timer for them

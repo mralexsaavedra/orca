@@ -720,10 +720,13 @@ describe('connectPanePty', () => {
     expect(deps.dispatchNotification).not.toHaveBeenCalled()
   })
 
-  // Why: the working→idle transition is the attention signal for agent
-  // panes. onAgentBecameIdle must mark the tab and worktree unread so
-  // background agent tabs get the indicator on completion.
-  it('marks tab and worktree unread on agent working→idle transition', async () => {
+  // Why: working→idle transitions fire the worktree-level bell and the OS
+  // notification, but must NOT mark the tab unread. Agent titles flash
+  // through working→idle on repaints triggered by tab switches and resizes,
+  // which would produce a tab-level bell the user can't dismiss. Tab-level
+  // attention for agents is intentionally disabled — the worktree bell +
+  // OS notification cover the cross-surface "agent finished" signal.
+  it('fires worktree unread and OS notification on agent idle, but not tab unread', async () => {
     const { connectPanePty } = await import('./pty-connection')
     const transport = createMockTransport()
     transportFactoryQueue.push(transport)
@@ -744,7 +747,7 @@ describe('connectPanePty', () => {
     idleHandler('* Claude done')
 
     expect(deps.markWorktreeUnread).toHaveBeenCalledTimes(1)
-    expect(deps.markTerminalTabUnread).toHaveBeenCalledTimes(1)
+    expect(deps.markTerminalTabUnread).not.toHaveBeenCalled()
     expect(deps.dispatchNotification).toHaveBeenCalledWith({
       source: 'agent-task-complete',
       terminalTitle: '* Claude done'
