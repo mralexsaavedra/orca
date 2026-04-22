@@ -612,6 +612,20 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
 
   markTerminalTabUnread: (tabId) => {
     const state = get()
+    // Why: agent panes (Claude Code, etc.) emit spurious signals — BEL bytes
+    // in their render loop, working→idle title flashes on tab switch/resize.
+    // Tab-level attention for agent panes has proven unreliable; the user
+    // can't dismiss it because the agent re-triggers it on every tab switch.
+    // Suppress tab-level marking for panes that have ever been identified as
+    // agent panes. Worktree-level unread + OS notifications still fire for
+    // these panes (via markWorktreeUnread and dispatchNotification) so the
+    // user does get a cross-surface completion cue.
+    const ownerTab = Object.values(state.tabsByWorktree ?? {})
+      .flat()
+      .find((t) => t.id === tabId)
+    if (ownerTab?.wasAgentPane) {
+      return
+    }
     // Why: skip tabs the user is already looking at. We must check both
     // activeTabType AND activeTabId because activeTabId remains pinned to the
     // last terminal tab even when the user has switched surfaces to the editor

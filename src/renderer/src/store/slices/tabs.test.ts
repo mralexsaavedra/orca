@@ -536,6 +536,39 @@ describe('TabsSlice', () => {
       // Same object reference => no state mutation occurred.
       expect(store.getState().unreadTerminalTabs).toBe(before)
     })
+
+    // Why: agent panes emit spurious signals (BEL noise in their render loop,
+    // working→idle title flashes on tab switch) that produce an
+    // undismissable tab bell. Hard-gate: once a tab is latched as an agent
+    // pane, markTerminalTabUnread is a no-op for it. Worktree-level unread
+    // and OS notifications still fire via their own paths.
+    it('suppresses marking for a tab that has been latched as an agent pane', () => {
+      const agentTabId = 'agent-tab-1'
+      store.setState({
+        activeTabId: 'something-else',
+        activeTabType: 'terminal',
+        activeWorktreeId: 'other-wt',
+        tabsByWorktree: {
+          [WT]: [
+            {
+              id: agentTabId,
+              ptyId: null,
+              worktreeId: WT,
+              title: '* Claude done',
+              customTitle: null,
+              color: null,
+              sortOrder: 0,
+              createdAt: Date.now(),
+              wasAgentPane: true
+            }
+          ]
+        }
+      })
+
+      store.getState().markTerminalTabUnread(agentTabId)
+
+      expect(store.getState().unreadTerminalTabs[agentTabId]).toBeUndefined()
+    })
   })
 
   // ─── focusGroup clears unread on focused group's terminal tab ─────────
