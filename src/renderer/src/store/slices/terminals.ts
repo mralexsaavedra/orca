@@ -612,18 +612,38 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
 
   markTerminalTabUnread: (tabId) => {
     const state = get()
-    // Why: agent panes (Claude Code, etc.) emit spurious signals — BEL bytes
-    // in their render loop, working→idle title flashes on tab switch/resize.
-    // Tab-level attention for agent panes has proven unreliable; the user
-    // can't dismiss it because the agent re-triggers it on every tab switch.
-    // Suppress tab-level marking for panes that have ever been identified as
-    // agent panes. Worktree-level unread + OS notifications still fire for
-    // these panes (via markWorktreeUnread and dispatchNotification) so the
-    // user does get a cross-surface completion cue.
     const ownerTab = Object.values(state.tabsByWorktree ?? {})
       .flat()
       .find((t) => t.id === tabId)
-    if (ownerTab?.wasAgentPane) {
+    // Why: agent panes (Claude Code, etc.) emit spurious signals that would
+    // produce an undismissable tab bell: BEL bytes in the agent's render
+    // loop, and working→idle title flashes on tab switch/resize. Tab-level
+    // attention for agent panes was unreliable — the user couldn't dismiss
+    // it because the agent kept re-triggering it.
+    //
+    // Three signals mean "this is an agent pane" and we should drop the
+    // mark:
+    //   1. wasAgentPane latch (persistent, set when updateTabTitle ever
+    //      sees an agent title; survives hydration).
+    //   2. Live tab title matching an agent pattern (covers in-session
+    //      windows before the latch is written).
+    //   3. Any pane under this tab has a runtime title matching an agent
+    //      pattern (covers split panes where the TAB title hasn't updated
+    //      yet but a pane is running an agent). The live pane titles in
+    //      runtimePaneTitlesByTabId are updated on every OSC frame, so this
+    //      catches agents even during the first PTY bytes on reattach.
+    //
+    // Worktree-level unread + OS notifications still fire for these panes
+    // via their own paths (markWorktreeUnread, dispatchNotification) so the
+    // user still gets a cross-surface completion cue.
+    const hasAgentTitle = (title: string | undefined | null): boolean =>
+      !!title && detectAgentStatusFromTitle(title) !== null
+    const paneTitles = state.runtimePaneTitlesByTabId[tabId] ?? {}
+    const isAgentPane =
+      ownerTab?.wasAgentPane === true ||
+      hasAgentTitle(ownerTab?.title) ||
+      Object.values(paneTitles).some(hasAgentTitle)
+    if (isAgentPane) {
       return
     }
     // Why: skip tabs the user is already looking at. We must check both
