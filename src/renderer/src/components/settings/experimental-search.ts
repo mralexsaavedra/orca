@@ -22,6 +22,11 @@ export const EXPERIMENTAL_PANE_SEARCH_ENTRIES: SettingsSearchEntry[] = [
     ]
   },
   {
+    title: 'Pet',
+    description: 'Floating animated pet in the bottom-right corner.',
+    keywords: ['experimental', 'pet', 'mascot', 'overlay', 'animated', 'corner']
+  },
+  {
     title: 'Agent Orchestration',
     description:
       'Coordinate multiple coding agents via messaging, task DAGs, dispatch, and decision gates.',

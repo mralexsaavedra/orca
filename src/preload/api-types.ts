@@ -10,6 +10,7 @@ import type {
   CodexRateLimitAccountsState,
   CreateWorktreeArgs,
   CreateWorktreeResult,
+  CustomPetModel,
   DirEntry,
   FsChangedPayload,
   GhosttyImportPreview,
@@ -582,6 +583,11 @@ export type PreloadApi = {
     pickImage: () => Promise<string | null>
     pickDirectory: (args: { defaultPath?: string }) => Promise<string | null>
     copyFile: (args: { srcPath: string; destPath: string }) => Promise<void>
+  }
+  pet: {
+    importModel: () => Promise<CustomPetModel | null>
+    readModel: (id: string, fileName: string) => Promise<ArrayBuffer | null>
+    deleteModel: (id: string, fileName: string) => Promise<void>
   }
   browser: BrowserApi
   hooks: {

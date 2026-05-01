@@ -52,6 +52,9 @@ const Settings = lazy(() => import('./components/settings/Settings'))
 const QuickOpen = lazy(() => import('./components/QuickOpen'))
 const WorktreeJumpPalette = lazy(() => import('./components/WorktreeJumpPalette'))
 const NewWorkspaceComposerModal = lazy(() => import('./components/NewWorkspaceComposerModal'))
+// Why: lazy-loaded so the WebP asset + overlay module aren't fetched unless
+// the user opts into the experimental flag.
+const PetOverlay = lazy(() => import('./components/pet/PetOverlay'))
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
@@ -146,6 +149,8 @@ function App(): React.JSX.Element {
   // subscriptions (agentStatusByPaneKey, agentStatusEpoch, etc.) instead of
   // keeping them alive behind an early-return inside the hook bodies.
   const agentDashboardEnabled = useAppStore((s) => s.settings?.experimentalAgentDashboard === true)
+  const petEnabled = useAppStore((s) => s.settings?.experimentalPet === true)
+  const petVisible = useAppStore((s) => s.petVisible)
   const canGoBackWorktree = useAppStore(canGoBackWorktreeHistory)
   const canGoForwardWorktree = useAppStore(canGoForwardWorktreeHistory)
   const titlebarLeftControlsRef = useRef<HTMLDivElement | null>(null)
@@ -1105,6 +1110,15 @@ function App(): React.JSX.Element {
         {mountedLazyModalIds.has('quick-open') ? <QuickOpen /> : null}
         {mountedLazyModalIds.has('worktree-palette') ? <WorktreeJumpPalette /> : null}
       </Suspense>
+      {/* Why: mount PetOverlay only when the experimental flag is on AND
+          the user hasn't hit "Hide pet" in the status-bar menu. Both
+          conditions must be true — see design doc (pet-overlay.md) on why
+          the two toggles are kept independent. */}
+      {petEnabled && petVisible ? (
+        <Suspense fallback={null}>
+          <PetOverlay />
+        </Suspense>
+      ) : null}
       <UpdateCard />
       <StarNagCard />
       <ZoomOverlay />
