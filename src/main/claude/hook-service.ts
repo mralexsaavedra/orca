@@ -54,9 +54,7 @@ function getManagedCommand(scriptPath: string): string {
   // collapse and the launcher fails with `command not found`. Emit forward
   // slashes — Windows accepts them in path arguments and bash leaves them
   // intact, so the same JSON value works through every shell layer.
-  return process.platform === 'win32'
-    ? scriptPath.replaceAll('\\', '/')
-    : `/bin/sh "${scriptPath}"`
+  return process.platform === 'win32' ? scriptPath.replaceAll('\\', '/') : `/bin/sh "${scriptPath}"`
 }
 
 function getManagedScript(): string {
